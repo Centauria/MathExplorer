@@ -321,7 +321,15 @@ export default function mathxAutorun(pi: ExtensionApi) {
         .then((r) => r.ok)
         .catch(() => false);
       if (!gwUp) {
-        await execLine('start "mathx-gateway" /min uv run python -m mathx.gateway');
+        // Fire-and-forget: redirect the child's stdio to a file so it cannot
+        // inherit our cmd's pipes (inherited pipes keep pi.exec waiting for
+        // EOF → 30s handler timeout). Race with a 4s cap as belt-and-braces.
+        const cap = Promise.withResolvers<unknown>();
+        setTimeout(cap.resolve, 4000);
+        await Promise.race([
+          execLine('start "mathx-gateway" /min cmd /c "uv run python -m mathx.gateway >> logs\\gateway.log 2>&1"'),
+          cap.promise,
+        ]);
         ctx.ui.notify("mathx gateway (:8399) 未运行，已在后台启动", "info");
       }
     } catch { /* gateway optional; worker spawns will fail visibly if it stays down */ }

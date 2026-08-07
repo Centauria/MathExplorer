@@ -5,11 +5,14 @@ __pycache__/
 *.pyc
 downloads/
 logs/
+.tmp/
+.uvcache/
 
 # --- runtime data: the framework tracks only placeholders, never content ---
 _tmp_*.json
 data/registry.json
 data/STOP
+data/CHAIN_ON
 data/inbox/*
 !data/inbox/.gitkeep
 data/seeds/*

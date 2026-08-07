@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from mathx.memory import bm25_score_documents, tokenize_bm25
-from mathx.verify import _extract_json
+from mathx.aggregate import _extract_json
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = REPO_ROOT / "data"

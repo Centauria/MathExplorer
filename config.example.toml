@@ -9,8 +9,10 @@
 # Two LLM paths — read this before touching anything
 # ------------------------------------------------------------
 # A) mathx CLIs (this file's [roles]):
-#      `mathx.fleet` batches, `mathx.verify` jury, `mathx.harvest` dedup judge.
+#      `mathx.fleet` batches, `mathx.harvest` dedup judge.
 #      They call providers DIRECTLY using the pools below.
+#      (Proof verification uses NO fleet role: 3 omp referee subagents +
+#      the deterministic `mathx.aggregate` CLI.)
 # B) omp subagent workers (solver/hunter):
 #      Models come from omp's own config (~/.omp/agent/config.yml `modelRoles`,
 #      bound per agent via .omp/agents/*.md frontmatter `model: "@<role>"`).
@@ -55,12 +57,10 @@ keys = ["REPLACE-KEY-1", "REPLACE-KEY-2"]
 # selectors rotate by task index (reproducible, coverage-guaranteed).
 #   default — fallback for anything unnamed
 #   prover  — solver's fleet decomposition batches
-#   jury    — mathx.verify 3-juror panel
 #   judge   — harvest ingest dedup decisions
 [roles]
 default = ["stepfun/step-3.7-flash"]
 prover = ["stepfun/step-3.7-flash"]
-jury = ["stepfun/step-3.7-flash"]
 judge = ["stepfun/step-3.7-flash"]
 
 # ------------------------------------------------------------

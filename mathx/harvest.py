@@ -14,6 +14,7 @@ CLI:
     uv run python -m mathx.harvest ingest
     uv run python -m mathx.harvest next-field
     uv run python -m mathx.harvest list [--status s] [--field f]
+    uv run python -m mathx.harvest show [problem_id] [--status s] [--field f]
     uv run python -m mathx.harvest set-status <problem_id> <status>
     uv run python -m mathx.harvest mark-hunted <field>
 """
@@ -391,6 +392,54 @@ def list_problems(status: str | None = None, field: str | None = None) -> list[d
     return out
 
 
+def show_problems(
+    problem_id: str | None = None, status: str | None = None, field: str | None = None
+) -> dict:
+    """Registry entries plus full statement text from data/problems/<id>.md.
+
+    Bare-token resolution order: exact id > status name (queued/exploring/...)
+    > field name > unique prefix on the id or its slug part. Ambiguous prefix ->
+    {"ambiguous": true, "matches": [...]}. Status/field tokens act as filters
+    on top of any --status/--field flags. Without a token, every entry passing
+    the filters is shown.
+    """
+    entries = list_problems(status=status, field=field)
+    if problem_id:
+        exact = [e for e in entries if e["id"] == problem_id]
+        if exact:
+            entries = exact
+        elif problem_id in STATUSES:
+            entries = [e for e in entries if e["status"] == problem_id]
+        elif problem_id in load_fields():
+            entries = [e for e in entries if e["field"] == problem_id]
+        else:
+            matches = [
+                e
+                for e in entries
+                if e["id"].startswith(problem_id) or e["id"].rsplit("/", 1)[-1].startswith(problem_id)
+            ]
+            if not matches:
+                raise KeyError(f"problem not found: {problem_id}")
+            if len(matches) > 1:
+                return {
+                    "ambiguous": True,
+                    "matches": [{"id": e["id"], "title": e["title"]} for e in matches],
+                }
+            entries = matches
+    out = []
+    for e in entries:
+        path = PROBLEMS_DIR / f"{e['id']}.md"
+        statement = path.read_text(encoding="utf-8") if path.exists() else None
+        out.append(
+            {
+                "entry": e,
+                "statement_file": str(path.relative_to(REPO_ROOT)),
+                "statement": statement,
+            }
+        )
+    return {"count": len(out), "problems": out}
+
+
 # ---------------------------------------------------------------- CLI
 
 def _stdio_utf8() -> None:
@@ -412,6 +461,10 @@ def main(argv: list[str] | None = None) -> int:
     p_list = sub.add_parser("list", help="list registry problems")
     p_list.add_argument("--status")
     p_list.add_argument("--field")
+    p_show = sub.add_parser("show", help="show problem(s) with full statement text")
+    p_show.add_argument("problem_id", nargs="?")
+    p_show.add_argument("--status")
+    p_show.add_argument("--field")
     p_set = sub.add_parser("set-status")
     p_set.add_argument("problem_id")
     p_set.add_argument("status")
@@ -425,6 +478,8 @@ def main(argv: list[str] | None = None) -> int:
             print(next_field())
         elif args.cmd == "list":
             _print(list_problems(status=args.status, field=args.field))
+        elif args.cmd == "show":
+            _print(show_problems(problem_id=args.problem_id, status=args.status, field=args.field))
         elif args.cmd == "set-status":
             _print(set_status(args.problem_id, args.status))
         elif args.cmd == "mark-hunted":

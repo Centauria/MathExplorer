@@ -22,7 +22,7 @@ const CONTINUE_PROMPT =
   "检查 MathExplorer 循环：读 data/registry.json 与 results/ 下各 run.json；按项目根 AGENTS.md 的调度纪律推进（复活/分派/补货），全部产物落盘。";
 
 const CHEATSHEET_LINES = [
-  "MathExplorer: /mx 速查表 · /ask <命题> 猜想分诊 · /solve [id] 攻关 · /hunt [field] [quota] 补货 · /brief 简报",
+  "MathExplorer: /mx 速查表 · /ask <命题> 猜想分诊 · /solve [id] 攻关 · /hunt [field] [quota] 补货 · /brief 简报 · /show <id> 看题",
   "/stop 紧急制动 · /autorun on|off|status 无人值守 · data/seeds/ 丢.md录入 · data/STOP=总闸",
   "内置: /model 切模型 · /pause 暂停 · /collab 远程介入 · /reload-plugins 刷新命令 · Esc 中断当前轮",
 ];
@@ -65,11 +65,17 @@ interface ExtensionApi {
   on(event: "session_start" | "input", handler: (event: unknown, ctx: ExtensionContext) => void | Promise<void>): void;
   registerCommand(
     name: string,
-    def: { description: string; handler: (args: string, ctx: ExtensionContext) => void | Promise<void> },
+    def: {
+      description: string;
+      getArgumentCompletions?: (
+        argumentPrefix: string,
+      ) => { value: string; label: string; description?: string }[] | null;
+      handler: (args: string, ctx: ExtensionContext) => void | Promise<void>;
+    },
   ): void;
   appendEntry(customType: string, data: unknown): void;
   sendUserMessage(content: string): void;
-  exec(cmd: string): Promise<unknown>;
+  exec(command: string, args?: string[], options?: unknown): Promise<unknown>;
 }
 
 interface QuotaConfig {
@@ -123,14 +129,16 @@ function readQuota(configText: string): QuotaConfig {
 function normalizeExec(r: unknown): ExecResult {
   if (typeof r === "string") return { ok: true, text: r };
   if (r && typeof r === "object") {
-    const text =
+    const stdout =
       "stdout" in r && typeof r.stdout === "string"
         ? r.stdout
         : "output" in r && typeof r.output === "string"
           ? r.output
           : "text" in r && typeof r.text === "string"
             ? r.text
-            : JSON.stringify(r);
+            : "";
+    const stderr = "stderr" in r && typeof r.stderr === "string" ? r.stderr : "";
+    const text = stdout + (stderr ? (stdout ? "\n[stderr] " : "") + stderr : "") || JSON.stringify(r);
     const code =
       "code" in r && typeof r.code === "number"
         ? r.code
@@ -191,6 +199,22 @@ export default function mathxAutorun(pi: ExtensionApi) {
     } catch { /* UI optional */ }
   }
 
+  /**
+   * Run one shell command line through pi.exec. The current runtime spreads
+   * `args` internally, so a bare single-string pi.exec(line) throws "Spread
+   * syntax requires ...iterable" — always pass an explicit args array via a
+   * platform shell. Prefer execMathx for mathx CLIs: no shell, no quoting bugs.
+   */
+  async function execLine(line: string): Promise<ExecResult> {
+    const win = process.platform === "win32";
+    return normalizeExec(await pi.exec(win ? "cmd" : "sh", [win ? "/c" : "-c", line]));
+  }
+
+  /** mathx CLI: direct argv execution (no shell, no quoting bugs). */
+  async function execMathx(moduleArgs: string[]): Promise<ExecResult> {
+    return normalizeExec(await pi.exec("uv", ["run", "python", "-m", ...moduleArgs]));
+  }
+
   async function quotaGateOpen(ctx: ExtensionContext): Promise<boolean> {
     let quota: QuotaConfig;
     try {
@@ -205,7 +229,7 @@ export default function mathxAutorun(pi: ExtensionApi) {
         const resp = await fetch(quota.cmd, { signal: AbortSignal.timeout(10_000) });
         text = await resp.text();
       } else {
-        const r = normalizeExec(await pi.exec(quota.cmd));
+        const r = await execLine(quota.cmd);
         if (!r.ok) return true; // command failed: never gate
         text = r.text;
       }
@@ -290,6 +314,99 @@ export default function mathxAutorun(pi: ExtensionApi) {
     },
   });
 
+  // ---- /show: inspect recorded problems; Tab-completes ids, fields, statuses ----
+  const SHOW_STATUSES = ["queued", "exploring", "solved", "falsified", "stalled"];
+  interface RegistryEntryLite {
+    id: string;
+    title: string;
+    status: string;
+    tractability: number;
+    field: string;
+  }
+  let showRegistryCache: { at: number; entries: RegistryEntryLite[]; fields: string[] } | null = null;
+
+  function loadShowRegistry(): { entries: RegistryEntryLite[]; fields: string[] } {
+    if (showRegistryCache && Date.now() - showRegistryCache.at < 5000) return showRegistryCache;
+    let entries: RegistryEntryLite[] = [];
+    let fields: string[] = [];
+    try {
+      const reg = JSON.parse(readFileSync(join(process.cwd(), "data", "registry.json"), "utf-8"));
+      entries = (reg.problems ?? []).map((p: RegistryEntryLite) => ({
+        id: p.id, title: p.title, status: p.status, tractability: p.tractability, field: p.field,
+      }));
+    } catch { /* registry unreadable: complete with flags only */ }
+    try {
+      fields = readFileSync(join(process.cwd(), "data", "fields.txt"), "utf-8")
+        .split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    } catch { /* fields.txt unreadable */ }
+    showRegistryCache = { at: Date.now(), entries, fields };
+    return showRegistryCache;
+  }
+
+  interface ShowOutput {
+    ambiguous?: boolean;
+    matches?: { id: string; title: string }[];
+    count?: number;
+    problems?: { entry: RegistryEntryLite; statement: string | null }[];
+  }
+
+  pi.registerCommand("show", {
+    description: "查看已记录问题：/show <id前缀|status|field> 或 /show --field <f> --status <s>",
+    getArgumentCompletions: (prefix: string) => {
+      const { entries, fields } = loadShowRegistry();
+      const p = (prefix || "").toLowerCase();
+      const items: { value: string; label: string; description?: string }[] = [];
+      for (const flag of ["--field", "--status"]) {
+        if (flag.startsWith(p)) items.push({ value: flag, label: flag });
+      }
+      for (const f of fields) {
+        if (f.toLowerCase().startsWith(p)) items.push({ value: f, label: f, description: "field" });
+      }
+      for (const s of SHOW_STATUSES) {
+        if (s.startsWith(p)) items.push({ value: s, label: s, description: "status" });
+      }
+      for (const e of entries) {
+        if (e.id.toLowerCase().includes(p) || e.title.toLowerCase().includes(p)) {
+          items.push({ value: e.id, label: e.id, description: `[${e.status}|t${e.tractability}] ${e.title}` });
+        }
+      }
+      return items.slice(0, 50);
+    },
+    handler: async (args: string, ctx: ExtensionContext) => {
+      const tokens = (args || "").trim().split(/\s+/).filter(Boolean);
+      const r = await execMathx(["mathx.harvest", "show", ...tokens]);
+      if (!r.ok) {
+        ctx.ui.notify(`show 失败: ${r.text.trim().slice(0, 300)}`, "error");
+        return;
+      }
+      let out: ShowOutput;
+      try {
+        out = JSON.parse(r.text) as ShowOutput;
+      } catch {
+        ctx.ui.notify(r.text.trim().slice(0, 500) || "(empty show output)", "info");
+        return;
+      }
+      if (out.ambiguous) {
+        const lines = (out.matches ?? []).map((m) => `  ${m.id} — ${m.title}`);
+        ctx.ui.notify(`前缀不唯一，匹配 ${lines.length} 个:\n${lines.join("\n")}`, "warning");
+        return;
+      }
+      const problems = out.problems ?? [];
+      if (!out.count || problems.length === 0) {
+        ctx.ui.notify("没有匹配的问题", "warning");
+        return;
+      }
+      const blocks = problems.slice(0, 5).map((p) => {
+        const e = p.entry;
+        const body = String(p.statement ?? "(no statement file)").replace(/^---[\s\S]*?---\s*/, "").trim();
+        return `## ${e.title}\n${e.id} · ${e.status} · tractability=${e.tractability}\n\n${body}`;
+      });
+      let text = blocks.join("\n\n----------\n\n");
+      if (out.count > 5) text += `\n\n…共 ${out.count} 个匹配，仅显示前 5 个（请用更精确的 id/过滤条件）`;
+      ctx.ui.notify(text, "info");
+    },
+  });
+
   pi.registerCommand("autorun", {
     description: "MathExplorer 无人值守循环：/autorun on|off|status",
     handler: (args: string, ctx: ExtensionContext) => {
@@ -322,7 +439,7 @@ export default function mathxAutorun(pi: ExtensionApi) {
       const sub = parts[0] || "show";
 
       if (sub === "show") {
-        const r = normalizeExec(await pi.exec("uv run python -m mathx.config show --masked"));
+        const r = await execMathx(["mathx.config", "show", "--masked"]);
         ctx.ui.notify(r.text.trim() || "(empty config output)", "info");
         return;
       }
@@ -334,16 +451,14 @@ export default function mathxAutorun(pi: ExtensionApi) {
           ctx.ui.notify("用法: /config set <dot.path> <value>", "warning");
           return;
         }
-        const r = normalizeExec(
-          await pi.exec(`uv run python -m mathx.config set ${JSON.stringify(path)} ${JSON.stringify(value)}`),
-        );
+        const r = await execMathx(["mathx.config", "set", path, value]);
         const shown = path.endsWith(".keys") ? "<keys updated, masked>" : value;
         ctx.ui.notify(r.ok ? `已更新 ${path} = ${shown}` : `配置失败: ${r.text.trim()}`, r.ok ? "info" : "error");
         return;
       }
 
       if (sub === "test") {
-        const r = normalizeExec(await pi.exec("uv run python -m mathx.fleet --smoke"));
+        const r = await execMathx(["mathx.fleet", "--smoke"]);
         ctx.ui.notify(
           r.ok ? `fleet 冒烟通过: ${r.text.trim().slice(0, 200)}` : `fleet 冒烟失败: ${r.text.trim().slice(0, 300)}`,
           r.ok ? "info" : "error",
@@ -374,13 +489,13 @@ export default function mathxAutorun(pi: ExtensionApi) {
           ctx.ui.notify("setup 已取消", "info");
           return;
         }
-        await pi.exec(`uv run python -m mathx.config set providers.${provider}.api ${JSON.stringify(api)}`);
-        await pi.exec(`uv run python -m mathx.config set providers.${provider}.keys ${JSON.stringify(keys)}`);
-        await pi.exec(`uv run python -m mathx.config set active_provider ${JSON.stringify(provider)}`);
+        await execMathx(["mathx.config", "set", `providers.${provider}.api`, api]);
+        await execMathx(["mathx.config", "set", `providers.${provider}.keys`, keys]);
+        await execMathx(["mathx.config", "set", "active_provider", provider]);
         for (const role of ["default", "prover", "jury", "judge"]) {
-          const check = normalizeExec(await pi.exec(`uv run python -m mathx.config get roles.${role}`));
+          const check = await execMathx(["mathx.config", "get", `roles.${role}`]);
           if (!check.ok) {
-            await pi.exec(`uv run python -m mathx.config set roles.${role} ${JSON.stringify(`${provider}/${model}`)}`);
+            await execMathx(["mathx.config", "set", `roles.${role}`, `${provider}/${model}`]);
           }
         }
         ctx.ui.notify(`config.toml 已更新（provider=${provider}）。用 /config test 冒烟。`, "info");

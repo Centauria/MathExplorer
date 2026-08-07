@@ -295,6 +295,18 @@ export default function mathxAutorun(pi: ExtensionApi) {
       showCheatsheet(ctx);
     }
 
+    // The mathx LLM gateway (config.toml key pool, :8399) dies with the machine,
+    // not with omp — relaunch it detached whenever a session starts and it's down.
+    try {
+      const gwUp = await fetch("http://127.0.0.1:8399/healthz", { signal: AbortSignal.timeout(1500) })
+        .then((r) => r.ok)
+        .catch(() => false);
+      if (!gwUp) {
+        await execLine('start "mathx-gateway" /min uv run python -m mathx.gateway');
+        ctx.ui.notify("mathx gateway (:8399) 未运行，已在后台启动", "info");
+      }
+    } catch { /* gateway optional; worker spawns will fail visibly if it stays down */ }
+
     ctx.setInterval(() => {
       tick(ctx).catch(() => { /* contained by ctx.setInterval already; belt and braces */ });
     }, TICK_MS);

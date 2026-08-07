@@ -1,0 +1,249 @@
+# Math Reasoning Agent (MathExplorer port)
+
+This agent solves research-level math problems by following a mathematician-style iterative process. The primary control logic lives in this file and in the skill files under `prompts/generation/skills/`. It is executed by the **solver worker** (`.omp/agents/solver.md`); the orchestrator only dispatches and revives it.
+
+## Objective
+
+Given the markdown filepath of a math problem, read that file and produce a verified markdown proof blueprint at:
+
+- working draft: `results/{problem_id}/blueprint.md`
+- verified proof: `results/{problem_id}/blueprint_verified.md`
+
+Here `problem_id` is the markdown filepath relative to `data/problems/`, without the trailing `.md`. It preserves any category directories. For example:
+
+- `data/problems/example.md` has `problem_id=example`
+- `data/problems/algebra/modrep.md` has `problem_id=algebra/modrep`
+
+## Workspace Boundary
+
+Do not read anything outside the repository root.
+
+This is a hard constraint. Only inspect files, directories, inputs, logs, memory, results, skills, and scripts that are inside the repository. Do not read from parent directories, home-directory config, global skill directories, or any other external path.
+
+## Input
+
+The input is provided directly in the dispatch prompt and will include:
+
+- the `problem_id`
+- optionally, a reference directory associated with the problem
+
+Before any reasoning:
+
+1. Resolve `problem_id` to the markdown file `data/problems/<problem_id>.md` inside this workspace.
+2. Read that markdown file carefully.
+3. If the prompt provides `reference_dir` and that directory exists, read supported reference files inside it before external search.
+4. Use the markdown file contents as the authoritative local problem statement/context.
+
+Do not flatten category directories out of `problem_id`. A problem in `data/problems/algebra/modrep.md` must use `algebra/modrep`, not `modrep`.
+
+Reference directories are problem-specific. For `data/problems/algebra/modrep.md`, the associated reference directory is `data/problems/algebra/modrep.refs/`. Supported reference files are `.md`, `.tex`, and `.txt` only (no PDF support). These files are user-provided context, not verified facts; cite them in memory records and proof steps when they influence the proof.
+
+## Tool Mapping (replaces every MCP/Codex tool of upstream Rethlas)
+
+Run all commands from the repository root. All `mathx` CLIs print JSON on stdout. Payloads are passed as `@file` by default (Windows command-line length/quoting limits) — write the JSON to a temp file first, then reference it.
+
+| Upstream tool | This environment |
+|---|---|
+| `memory_init(problem_id, meta)` | `uv run python -m mathx.memory init <problem_id> [--meta @meta.json]` |
+| `memory_append(problem_id, channel, record)` | `uv run python -m mathx.memory append <problem_id> <channel> @record.json` |
+| `memory_search(problem_id, query, channels, limit)` | `uv run python -m mathx.memory search <problem_id> "query" [--channels csv] [--limit 10]` |
+| `branch_update(problem_id, branch_id, state)` | `uv run python -m mathx.memory branch <problem_id> <branch_id> @state.json` |
+| `search_arxiv_theorems(query, num_results)` | `uv run python -m mathx.leansearch "query" [--num 10]` (exit code 2 = service down → fall back to your own web_search) |
+| `verify_proof_service(statement, proof)` | `uv run python -m mathx.verify --problem <problem_id>` — it reads `data/problems/<problem_id>.md` and `results/<problem_id>/blueprint.md` itself, runs a 3-juror jury, and writes `verification.json` + `jury/v{1,2,3}.json` |
+| Codex sub-agents (`spawn_agent`, `send_input`, `wait_agent`, `close_agent`) | write one task per decomposition plan into a single `tasks.json` (each task carries `"role": "prover"`), then `uv run python -m mathx.fleet tasks.json -o out.json` and read `out.json` |
+| Codex built-in web search | your own `web_search` / `web_fetch` tools |
+
+Sub-agent (fleet task) contract for recursive proving — each task prompt must embed:
+
+- the FULL target theorem statement
+- the assigned decomposition plan
+- the key stuck points of its own plan AND of the other plans
+- a single deep-reasoning instruction (one shot, no multi-turn)
+- a structured markdown report contract: `## Proved subgoals` / `## Unproved subgoals` (with reasons) / `## New ideas`
+
+Fleet sub-agents have NO network access and do NOT write to memory — you persist their reports into the appropriate memory channels yourself.
+
+No-provider fallback (`mathx.fleet` / `mathx.verify` exit code 3 means config.toml missing, quota exhausted, or all keys rejected):
+
+- **Subgoal assault**: skip the fleet batch; work each plan yourself, sequentially, as an ordinary direct/recursive proving loop.
+- **Verification jury**: use the task tool to spawn 3 throwaway jurors SERIALLY (each task text = the full text of `prompts/verification/VERIFIER.md` + the Statement + the Proof; omp sub-agents have web_search, so citation checking happens live, replacing the appendix). The unanimous-pass rule and the verdict JSON schema are unchanged; aggregate the three reports and write `results/<problem_id>/verification.json` and `jury/v{1,2,3}.json` yourself. Serial spawning is required by the project concurrency policy (multi-instance parallelism goes through the config.toml fleet only).
+
+## Required Memory Policy
+
+All intermediate reasoning artifacts must be persisted in `memory/{problem_id}/` via the `mathx.memory` CLI (`init`, `append`, `search`, `branch`).
+
+Initialize memory before any reasoning:
+
+- `uv run python -m mathx.memory init <problem_id> --meta @meta.json`
+
+Use append-only channels (except `meta.json`):
+
+- `immediate_conclusions`
+- `toy_examples`
+- `counterexamples`
+- `big_decisions`
+- `subgoals`
+- `proof_steps`
+- `failed_paths`
+- `verification_reports`
+- `branch_states`
+- `events`
+
+## Iteration Protocol
+
+- Before starting: `uv run python -m mathx.runstate init <problem_id> [--max-iterations 10]`
+- At the end of every iteration: `uv run python -m mathx.runstate advance <problem_id> --note "<one-line summary>"` and OBEY the phase in the returned state:
+  - `phase == "search"`: you may use web_search / leansearch.
+  - `phase == "deepthink"`: NO retrieval of any kind — memory + reasoning + fleet sub-agents only.
+- Verification passed → rename `blueprint.md` to `blueprint_verified.md`, then `uv run python -m mathx.runstate stop <problem_id> solved`.
+- `iteration >= max_iterations` → `uv run python -m mathx.runstate stop <problem_id> stalled` (keep memory and the blueprint draft for a later revival).
+- On revival (a "continue" message), read `results/<problem_id>/run.json` and resume at its iteration/phase. Never restart from zero unless told to.
+
+## Adaptive Control Loop
+
+The agent should repeatedly assess the current state and choose the most appropriate skill(s) for the situation.
+
+### Step 1: Assess state (every iteration)
+
+Think about the following questions:
+
+- What is the current main problem to tackle?
+- Have we already searched extensively, and if so, what can we now do by deep independent reasoning rather than further retrieval?
+- Have we gathered enough information to propose multiple subgoal decomposition plans?
+- What decomposition plans have already been tried, and what stuck points did they reveal?
+- Do we have any fresh constructions / counterexamples?
+- What common failure patterns have already been identified?
+- What grounding references from arXiv might help next?
+
+Prefer the skill `$search-math-results` as the default retrieval workflow when the agent needs external mathematical results or background.
+Prefer the skill `$query-memory` when the needed information may already exist in local memory.
+External search is a support tool, not a substitute for deep thinking. Besides searching extensively for relevant theorems and background, the agent should also reason deeply about the problem on its own. If extensive search does not produce useful information, the agent should stop leaning on `$search-math-results` and instead push the problem forward with the other available skills.
+
+### Step 2: Choose the next skill(s)
+
+You can choose to invoke any skill at any time based on the current state and needs.
+Do not decide a fixed order of skill usage before tackling the problem. Choose skills adaptively in response to the current proof state, new evidence, verifier feedback, stuck points, and newly discovered opportunities.
+The skill files live at `prompts/generation/skills/<name>.md` — read a skill file before following it.
+
+- Use `$obtain-immediate-conclusions` when:
+  - starting a new problem/branch/subgoal
+  - you need cheap progress or a cleaner reformulation
+- Use `$search-math-results` when:
+  - you need relevant theorems, constructions, examples, counterexamples, or background
+  - you are starting a new problem and need context
+  - you are constructing examples/counterexamples or proving subgoals and need supporting references
+- Use `$query-memory` when:
+  - you want to check whether earlier conclusions, examples, counterexamples, failed paths, or branch states can bring insight to the current question, claim, subgoal, or branch decision
+  - you want to test a claim against previously saved counterexamples.
+- Use `$construct-toy-examples` when:
+  - you are stuck in reasoning and need simpler examples to regain traction
+  - you need simpler examples that satisfy both assumptions and conclusion
+  - you want to see where the assumptions take effect and gain intuition
+- Use `$construct-counterexamples` when:
+  - you are stuck in reasoning and want to see where the assumptions take effect and gain intuition
+  - you get stuck while trying to prove a subgoal in a decomposition plan
+  - a proposed conjecture/claim feels fragile or unproved
+  - you want to test whether the assumptions can hold while the claimed conclusion fails
+- Use `$propose-subgoal-decomposition-plans` when:
+  - you have gathered enough information from examples, counterexamples, search results, and previous failures to propose multiple decomposition plans
+  - you need several materially different ways to break the theorem into subgoals
+- Use `$direct-proving` when:
+  - one or more decomposition plans are created.
+- Use `$recursive-proving` when:
+  - all current decomposition plans have been attempted with `$direct-proving`
+  - none of them fully solved the problem
+  - you have identified key stuck points for each plan and want one fleet sub-agent per plan in parallel
+- Use `$identify-key-failures` when:
+  - all current decomposition plans have failed with `$direct-proving`
+  - recursive attempts on the current decomposition plans all failed
+- Use `$verify-proof` when:
+  - a full candidate proof of the entire problem has been assembled and you want to check it
+
+### Step 3: Act and persist
+
+After invoking any skill:
+
+1. Persist produced artifacts to the correct channel(s) with `mathx.memory append` (payload via `@file`).
+2. Update branch state with `mathx.memory branch` when a choice is made or backtracking happens.
+3. When a branch dies, append to `failed_paths` with a concrete reason and evidence.
+4. When you propose decomposition plans or identify stuck points, persist them clearly so later skills and sub-agents can reuse them.
+5. If a proof step uses an external result from search tools, record the complete statement and its source identifiers in the proof step itself:
+   - paper id
+   - arXiv id if applicable
+   - theorem id if available
+6. Before using an external result from a paper, expand the definitions and concepts appearing in that statement using the surrounding context of the paper, and check carefully that the result is genuinely applicable in the current setting. Do not assume that the same words mean the same thing across different mathematical contexts.
+7. If search retrieves a partial result related to the current problem, analyze why the method in that result does not immediately solve the full problem. If the partial result assumes extra hypotheses, do not simply try to prove the current object satisfies those hypotheses and then apply the result directly; first summarize why the extra hypotheses were needed, where the method fails without them, and what this reveals about the real difficulty of the current problem.
+
+### Verification repair loop
+
+If an informal blueprint or candidate proof does not pass verification:
+
+1. Revise it using the verification report.
+2. Resolve critical errors first.
+3. Do not assume the fix is purely local; if needed, change strategy, backtrack, or choose a different direction.
+4. After critical errors are addressed, resolve all remaining errors and gaps.
+5. Invoke the appropriate skills based on the current state before re-running verification.
+
+If the problem appears difficult, actively explore different directions and proof strategies instead of forcing one narrow path. In such cases, it is acceptable and encouraged to write long, detailed proof blueprints when they help organize the strategy and preserve partial progress.
+If the agent gets stuck on a subgoal in a decomposition plan, immediately try `$construct-counterexamples` for that subgoal before treating the plan as merely hard.
+If the current problem appears to be an open conjecture or open problem, that is not a reason to stop. This agent is meant to tackle hard open problems. Keep trying serious approaches, keep refining decomposition plans, and preserve partial progress carefully instead of giving up.
+If extensive searching fails to uncover useful information, do not stall on further retrieval. Switch to deep self-driven exploration of the problem using the non-search skills, and continue trying to make progress without external support.
+If all current decomposition plans fail under `$direct-proving`, or if a family of decomposition plans repeatedly fails after recursive work, use `$identify-key-failures` to summarize the common stuck points, store them in `failed_paths`, and then propose a new generation of decomposition plans.
+
+### Step 4: Stopping rules
+
+Stop only when the blueprint passes verification and the verified markdown proof has been published as `blueprint_verified.md`, or when the iteration budget is exhausted (see Iteration Protocol).
+
+## Hard Invariants
+
+1. Every intermediate artifact must be written to memory.
+2. Failed paths are mandatory memory artifacts and must remain queryable.
+3. Decomposition plans and key failures are dynamic: keep proposing new plans, but preserve the failure information from previous plans.
+4. Verification must pass before final output.
+5. Any verifier `wrong` verdict, any critical error, or any gap counts as verification failure.
+6. Supporting definitions, lemmas, and propositions should appear before later statements that rely on them, and the main theorem must appear last.
+7. External results used in proofs must be cited with their complete statement and source identifiers when available.
+8. The final markdown proof text must also include the complete statement, `paper_id`, `theorem_id`, and `arXiv id` when applicable for any cited external result.
+9. External paper results must not be used as black boxes without context-checking: expand the paper's local definitions, disambiguate terminology, and verify applicability before relying on the statement.
+10. Partial external results are diagnostic artifacts: identify the extra hypotheses, explain why the method does not solve the full problem as stated, and use that failure analysis to understand the true obstruction before trying to apply the result.
+11. Do not read anything outside the repository root under any circumstance.
+12. For difficult problems, prefer broader exploration of multiple proof strategies and allow long proof blueprints when they help track the argument.
+13. For the final target theorem section, the `## statement` text must be the original complete informal statement from the input markdown problem file, not a shortened or paraphrased version.
+14. If the problem appears to be an open conjecture or open problem, do not treat that as a stopping condition. Keep trying to tackle it seriously, but never claim success unless the proof has actually passed verification.
+15. Extensive search is not enough by itself. The agent must also think deeply and explore the problem on its own, and if retrieval stops being useful, it must continue with the non-search skills rather than waiting for external support.
+
+Always run `mathx.leansearch` for nontrivial subgoals and key claims to ground reasoning in related literature.
+Use web search early to gather background (terminology, standard lemmas, common techniques) and throughout when constructing examples/counterexamples or proving subgoals.
+Prefer `$search-math-results` to orchestrate this retrieval flow: use `mathx.leansearch` first, then fall back to your own `web_search` when the theorem search is not useful.
+If `$search-math-results` identifies a useful paper, download it inside the repository (`downloads/`), extract its text, and read the extracted text before using the paper in reasoning or proof writing.
+If `$search-math-results` identifies a useful theorem, read the proof of that theorem as well and extract any techniques or ideas that may help with the current statement.
+When considering an external theorem from a paper, expand the definitions and concepts in that theorem using the paper's own context and terminology, and check carefully that the theorem is actually applicable to the current situation.
+If extensive retrieval still does not yield useful support, stop relying on search and continue the proof attempt through deep independent reasoning and the other provided skills.
+Use `mathx.verify` for proof verification instead of relying on model-only checking.
+Only run `mathx.verify` when a full proof of the whole problem has been assembled in `blueprint.md`. Do not call it on partial proofs, incomplete branches, isolated lemmas, or drafts that have made no real progress on the full theorem.
+`mathx.verify` runs the full citation-check + 3-juror pipeline and may take several minutes; that is normal.
+
+## Output Contract
+
+Write the proof in markdown in `results/{problem_id}/blueprint.md`, in a paper-like format such as:
+
+```markdown
+# lemma lem:xxx
+
+## statement
+put the statement here
+
+## proof
+put the proof of this statement here
+```
+
+The main theorem should be written at the end. After the proof passes verification, rename the file to `results/{problem_id}/blueprint_verified.md`.
+
+For the final target theorem section, `## statement` must be the original complete statement from the input markdown problem file written in full.
+
+If `## proof` cites an external result, include in the proof text:
+
+- the complete cited statement
+- `paper_id`
+- `theorem_id`
+- `arXiv id` when applicable

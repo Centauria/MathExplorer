@@ -15,6 +15,7 @@
 
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
 
 const STATE_TYPE = "mathx.autorun.state";
 const CHAIN_STATE_TYPE = "mathx.chain.state";
@@ -321,15 +322,17 @@ export default function mathxAutorun(pi: ExtensionApi) {
         .then((r) => r.ok)
         .catch(() => false);
       if (!gwUp) {
-        // Fire-and-forget: redirect the child's stdio to a file so it cannot
-        // inherit our cmd's pipes (inherited pipes keep pi.exec waiting for
-        // EOF → 30s handler timeout). Race with a 4s cap as belt-and-braces.
-        const cap = Promise.withResolvers<unknown>();
-        setTimeout(cap.resolve, 4000);
-        await Promise.race([
-          execLine('start "mathx-gateway" /min cmd /c "uv run python -m mathx.gateway >> logs\\gateway.log 2>&1"'),
-          cap.promise,
-        ]);
+        // Fire-and-forget via a REAL detached process (Node spawn, not cmd
+        // `start`): cmd `start` inherits the outer cmd's pipes and pi.exec
+        // waits for EOF that never comes (30s handler timeout) — and its new
+        // window's cwd is unreliable. detached+stdio-ignore gives a clean
+        // background process with the project root as cwd.
+        spawn("uv", ["run", "python", "-m", "mathx.gateway"], {
+          cwd: ctx.cwd,
+          detached: true,
+          stdio: "ignore",
+          windowsHide: true,
+        }).unref();
         ctx.ui.notify("mathx gateway (:8399) 未运行，已在后台启动", "info");
       }
     } catch { /* gateway optional; worker spawns will fail visibly if it stays down */ }

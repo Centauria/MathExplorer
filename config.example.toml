@@ -1,0 +1,69 @@
+# ============================================================
+# MathExplorer fleet config — ANNOTATED TEMPLATE
+# Copy to config.toml and fill in real keys. config.toml itself is
+# machine-managed by `mathx.config set` (comments there are NOT preserved;
+# keep documentation edits HERE).
+# ============================================================
+
+# ------------------------------------------------------------
+# Two LLM paths — read this before touching anything
+# ------------------------------------------------------------
+# A) mathx CLIs (this file's [roles]):
+#      `mathx.fleet` batches, `mathx.verify` jury, `mathx.harvest` dedup judge.
+#      They call providers DIRECTLY using the pools below.
+# B) omp subagent workers (solver/hunter):
+#      Models come from omp's own config (~/.omp/agent/config.yml `modelRoles`,
+#      bound per agent via .omp/agents/*.md frontmatter `model: "@<role>"`).
+#      Those workers reach upstream through `mathx.gateway` (127.0.0.1:8399),
+#      which reads THIS file for provider endpoints + key pools — so the
+#      providers below are the single source of truth even for omp traffic.
+#    In short: [roles] = CLI roles only. Worker models live in omp config.
+
+# Active provider name (must match a [providers.<name>] section). Used by the
+# gateway as fallback when a request's model is unknown.
+active_provider = "stepfun"
+
+# ------------------------------------------------------------
+# Optional quota gate for the autorun metronome (.omp/extensions/autorun.ts)
+# ------------------------------------------------------------
+# cmd       — executable / script / http(s) URL whose output reports usage
+# used_re   — regex with ONE capture group: used ratio 0..1
+# threshold — pause auto-nudging when used >= threshold
+[quota]
+cmd = "quotameter"
+used_re = "(?m)^5h\\s+([0-9.]+)"
+threshold = 0.95
+
+# ------------------------------------------------------------
+# Provider pools. keys rotate round-robin (mathx.fleet: per-call forgiveness;
+# gateway: sticky dead on 401/402/403, failover before first byte).
+#
+# Optional extra key (hand-edit; `mathx.config set` does not write it, but it
+# survives because it lives in the raw TOML):
+#   wire = "anthropic"   # default "openai" — consumed by the gateway's
+#                        # /v1/models supported_endpoint_types, so omp
+#                        # discovery.type: proxy binds each model's protocol
+#                        # (chat/completions vs /messages) at discovery time.
+# api is the versioned base the client path is appended to, e.g.
+#   https://api.stepfun.com/step_plan/v1   (+ /chat/completions)
+[providers.stepfun]
+api = "https://api.stepfun.com/step_plan/v1"
+keys = ["REPLACE-KEY-1", "REPLACE-KEY-2"]
+
+# ------------------------------------------------------------
+# CLI roles (path A only). Selectors are "<provider>/<model>"; multiple
+# selectors rotate by task index (reproducible, coverage-guaranteed).
+#   default — fallback for anything unnamed
+#   prover  — solver's fleet decomposition batches
+#   jury    — mathx.verify 3-juror panel
+#   judge   — harvest ingest dedup decisions
+[roles]
+default = ["stepfun/step-3.7-flash"]
+prover = ["stepfun/step-3.7-flash"]
+jury = ["stepfun/step-3.7-flash"]
+judge = ["stepfun/step-3.7-flash"]
+
+# ------------------------------------------------------------
+# Theorem-search endpoint used by `mathx.leansearch`.
+[search]
+leansearch_endpoint = "https://leansearch.net/thm/search"

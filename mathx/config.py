@@ -110,9 +110,17 @@ def _toml_value(v) -> str:
     raise TypeError(f"cannot serialize {type(v).__name__} to TOML")
 
 
+_HEADER = """\
+# MathExplorer LLM fleet config — machine-managed by mathx.config.
+# Hand-written comments are NOT preserved (this header is regenerated).
+# Annotated documentation for every section: config.example.toml.
+
+"""
+
+
 def _dump_toml(data: dict) -> str:
     """Fixed section order: active_provider -> [quota] -> [providers.*] (alpha) -> [roles] -> [search]."""
-    lines: list[str] = []
+    lines: list[str] = [_HEADER.rstrip("\n")]
     if data.get("active_provider"):
         lines.append(f"active_provider = {_toml_str(str(data['active_provider']))}")
         lines.append("")

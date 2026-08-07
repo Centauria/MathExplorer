@@ -22,7 +22,7 @@ const CONTINUE_PROMPT =
   "检查 MathExplorer 循环：读 data/registry.json 与 results/ 下各 run.json；按项目根 AGENTS.md 的调度纪律推进（复活/分派/补货），全部产物落盘。";
 
 const CHEATSHEET_LINES = [
-  "MathExplorer: /mx 速查表 · /ask <命题> 猜想分诊 · /solve [id] 攻关 · /hunt [field] [quota] 补货 · /status 简报",
+  "MathExplorer: /mx 速查表 · /ask <命题> 猜想分诊 · /solve [id] 攻关 · /hunt [field] [quota] 补货 · /brief 简报",
   "/stop 紧急制动 · /autorun on|off|status 无人值守 · data/seeds/ 丢.md录入 · data/STOP=总闸",
   "内置: /model 切模型 · /pause 暂停 · /collab 远程介入 · /reload-plugins 刷新命令 · Esc 中断当前轮",
 ];
@@ -36,7 +36,11 @@ interface ExecResult {
 
 interface UiContext {
   notify(message: string, level: "info" | "warning" | "error"): void;
-  setWidget(lines: string[], placement: "aboveEditor" | "belowEditor"): void;
+  setWidget(
+    key: string,
+    lines: string[] | undefined,
+    options?: { placement?: "aboveEditor" | "belowEditor" },
+  ): void;
   input(prompt: string, defaultValue?: string): Promise<string | undefined>;
   confirm(message: string): Promise<boolean>;
 }
@@ -58,7 +62,7 @@ interface ExtensionContext {
 }
 
 interface ExtensionApi {
-  on(event: "session_start", handler: (event: unknown, ctx: ExtensionContext) => void | Promise<void>): void;
+  on(event: "session_start" | "input", handler: (event: unknown, ctx: ExtensionContext) => void | Promise<void>): void;
   registerCommand(
     name: string,
     def: { description: string; handler: (args: string, ctx: ExtensionContext) => void | Promise<void> },
@@ -166,6 +170,26 @@ function hasRunningJob(snapshot: unknown): boolean {
 export default function mathxAutorun(pi: ExtensionApi) {
   let autorunOn = false;
   let quotaSkips = 0;
+  let cheatsheetShown = false;
+
+  function showCheatsheet(ctx: ExtensionContext): void {
+    try {
+      ctx.ui.setWidget("mathx.cheatsheet", CHEATSHEET_LINES, { placement: "belowEditor" });
+      cheatsheetShown = true;
+    } catch {
+      try {
+        ctx.ui.notify(CHEATSHEET_LINES[0], "info");
+      } catch { /* UI optional */ }
+    }
+  }
+
+  function hideCheatsheet(ctx: ExtensionContext): void {
+    if (!cheatsheetShown) return;
+    cheatsheetShown = false;
+    try {
+      ctx.ui.setWidget("mathx.cheatsheet", undefined);
+    } catch { /* UI optional */ }
+  }
 
   async function quotaGateOpen(ctx: ExtensionContext): Promise<boolean> {
     let quota: QuotaConfig;
@@ -244,13 +268,7 @@ export default function mathxAutorun(pi: ExtensionApi) {
     } catch { /* state replay is best-effort */ }
 
     if (ctx.hasUI) {
-      try {
-        ctx.ui.setWidget(CHEATSHEET_LINES, "belowEditor");
-      } catch {
-        try {
-          ctx.ui.notify(CHEATSHEET_LINES[0], "info");
-        } catch { /* UI optional */ }
-      }
+      showCheatsheet(ctx);
     }
 
     ctx.setInterval(() => {
@@ -258,13 +276,17 @@ export default function mathxAutorun(pi: ExtensionApi) {
     }, TICK_MS);
   });
 
+  // The cheatsheet is a first-run hint: dismiss it as soon as the user sends
+  // anything. /mx brings it back; the next input hides it again.
+  pi.on("input", async (_e: unknown, ctx: ExtensionContext) => {
+    hideCheatsheet(ctx);
+  });
+
   pi.registerCommand("mx", {
     description: "MathExplorer 速查表（重新显示在编辑器下方）",
     handler: (_args: string, ctx: ExtensionContext) => {
-      try {
-        ctx.ui.setWidget(CHEATSHEET_LINES, "belowEditor");
-      } catch { /* fall through to notify */ }
-      ctx.ui.notify("速查表已显示在编辑器下方", "info");
+      showCheatsheet(ctx);
+      ctx.ui.notify("速查表已显示在编辑器下方（下一次输入后自动隐藏）", "info");
     },
   });
 

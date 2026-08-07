@@ -1,9 +1,0 @@
-{
-  "juror": 2,
-  "temperature": 0.5,
-  "summary": "The proof correctly establishes the irrationality of sqrt(2) via the standard infinite descent argument. All logical steps are valid: the assumption of rationality leads to a representation sqrt(2) = p/q in lowest terms; squaring yields p² = 2q², implying p is even; substituting p = 2r yields q² = 2r², implying q is even; this contradicts the coprimality of p and q. The algebraic manipulations and parity arguments are rigorously justified. No external citations are used.",
-  "critical_errors": [],
-  "gaps": [],
-  "verdict": "correct",
-  "repair_hints": ""
-}

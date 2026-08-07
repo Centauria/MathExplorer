@@ -5,3 +5,18 @@ __pycache__/
 *.pyc
 downloads/
 logs/
+
+# --- runtime data: the framework tracks only placeholders, never content ---
+_tmp_*.json
+data/registry.json
+data/STOP
+data/inbox/*
+!data/inbox/.gitkeep
+data/seeds/*
+!data/seeds/.gitkeep
+data/problems/*
+!data/problems/.gitkeep
+memory/*
+!memory/.gitkeep
+results/*
+!results/.gitkeep

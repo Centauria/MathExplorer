@@ -1,9 +1,0 @@
-{
-  "juror": 3,
-  "temperature": 0.8,
-  "summary": "The proof correctly establishes the irrationality of √2 via contradiction. It properly reduces the fraction to lowest terms, derives p² = 2q², shows p must be even, substitutes to find q² = 2r², shows q must be even, and derives the contradiction that p and q share a factor of 2 despite being coprime. All algebraic steps and logical inferences are valid and complete.",
-  "critical_errors": [],
-  "gaps": [],
-  "verdict": "correct",
-  "repair_hints": ""
-}

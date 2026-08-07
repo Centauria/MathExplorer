@@ -1,9 +1,0 @@
-{
-  "juror": 1,
-  "temperature": 0.2,
-  "summary": "The proof is the standard, logically valid demonstration that √2 is irrational. All deduction steps are correct: the reduction to lowest terms is properly applied, the even/odd parity argument for squares is accurate, algebraic substitutions are valid, and the contradiction from the coprimality assumption is correctly derived. No external citations are present, and no gaps or errors exist in the reasoning.",
-  "critical_errors": [],
-  "gaps": [],
-  "verdict": "correct",
-  "repair_hints": ""
-}

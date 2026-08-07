@@ -44,6 +44,8 @@ Run all commands from the repository root. All `mathx` CLIs print JSON on stdout
 
 **CRITICAL (Windows subprocess hang):** when spawning any subprocess from your `eval` tool, you MUST pass `stdin=subprocess.DEVNULL` (Python) — a child spawned with inherited stdin deadlocks forever on this machine, even for `python -c "print('hi')"`. This is not a `mathx` problem; it is the environment. If you forget and the cell hangs, the kernel is killed and your cell state is lost.
 
+**Cleanup:** delete every `_tmp_*.json` payload file after the CLI that consumes it has succeeded. They are intermediates, not artifacts — durable copies live in `memory/<problem_id>/` and `results/<problem_id>/`.
+
 | Upstream tool | This environment |
 |---|---|
 | `memory_init(problem_id, meta)` | `uv run python -m mathx.memory init <problem_id> [--meta @meta.json]` |

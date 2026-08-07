@@ -1,7 +1,7 @@
 ---
 name: solver
 description: Works one open math problem end-to-end following prompts/generation/AGENTS.md — the Rethlas-style generate-verify-repair loop. Revivable across iterations.
-tools: read, write, grep, glob, bash, eval, web_search
+tools: read, write, grep, glob, bash, eval, web_search, task
 model: "@mathx_solver"
 ---
 

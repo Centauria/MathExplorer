@@ -42,6 +42,8 @@ Reference directories are problem-specific. For `data/problems/algebra/modrep.md
 
 Run all commands from the repository root. All `mathx` CLIs print JSON on stdout. Payloads are passed as `@file` by default (Windows command-line length/quoting limits) — write the JSON to a temp file first, then reference it.
 
+**CRITICAL (Windows subprocess hang):** when spawning any subprocess from your `eval` tool, you MUST pass `stdin=subprocess.DEVNULL` (Python) — a child spawned with inherited stdin deadlocks forever on this machine, even for `python -c "print('hi')"`. This is not a `mathx` problem; it is the environment. If you forget and the cell hangs, the kernel is killed and your cell state is lost.
+
 | Upstream tool | This environment |
 |---|---|
 | `memory_init(problem_id, meta)` | `uv run python -m mathx.memory init <problem_id> [--meta @meta.json]` |

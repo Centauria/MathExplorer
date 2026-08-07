@@ -10,7 +10,9 @@
   "ingested_inboxes": [
     "2026-08-07T12-39-25Z_hunter.jsonl"
   ],
-  "ingested_seeds": [],
+  "ingested_seeds": [
+    "euler-polynomial-n2-n-41-prime.md"
+  ],
   "problems": [
     {
       "id": "number-theory/brocard-s-problem-brown-numbers",
@@ -58,6 +60,18 @@
       ],
       "added_at_utc": "2026-08-07T12:43:57.561243+00:00",
       "last_activity_utc": "2026-08-07T12:43:57.561243+00:00"
+    },
+    {
+      "id": "number-theory/n-2-n-41-is-prime-for-all-non-negative-integers-n",
+      "title": "n^2 + n + 41 is prime for all non-negative integers n",
+      "field": "number-theory",
+      "origin": "user",
+      "status": "falsified",
+      "tractability": 1,
+      "attempts": 0,
+      "sources": [],
+      "added_at_utc": "2026-08-07T12:54:57.020916+00:00",
+      "last_activity_utc": "2026-08-07T12:54:57.204958+00:00"
     }
   ]
 }

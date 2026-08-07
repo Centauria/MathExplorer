@@ -76,6 +76,16 @@ interface QuotaConfig {
 
 // ---- helpers ----
 
+/** Build a RegExp from a pattern that may carry inline (?flags) — JS RegExp lacks inline-flag syntax. */
+function buildRegex(src: string): RegExp | null {
+  const inline = /^\(\?([dgimsuvy]*)\)/.exec(src);
+  try {
+    return inline ? new RegExp(src.slice(inline[0].length), inline[1]) : new RegExp(src);
+  } catch {
+    return null;
+  }
+}
+
 /** Section-aware flat-key extraction of [quota] from config.toml (no full TOML parse needed). */
 function readQuota(configText: string): QuotaConfig {
   const out: QuotaConfig = {};
@@ -178,12 +188,9 @@ export default function mathxAutorun(pi: ExtensionApi) {
     } catch {
       return true; // exec/fetch failed: never gate
     }
-    let m: RegExpMatchArray | null = null;
-    try {
-      m = text.match(new RegExp(quota.usedRe));
-    } catch {
-      return true; // bad regex: never gate
-    }
+    const re = buildRegex(quota.usedRe);
+    if (!re) return true; // bad regex: never gate
+    const m = re.exec(text);
     if (!m || m[1] === undefined) return true; // no capture: never gate
     const used = Number.parseFloat(m[1]);
     if (!Number.isFinite(used)) return true;

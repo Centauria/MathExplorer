@@ -13,17 +13,18 @@
 // If cmd/used_re are missing, the command fails, or the regex does not match,
 // the gate is OPEN (no gating) — quota querying is an optimization, never a dependency.
 
-import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const STATE_TYPE = "mathx.autorun.state";
+const CHAIN_STATE_TYPE = "mathx.chain.state";
 const TICK_MS = 60_000;
 const CONTINUE_PROMPT =
   "检查 MathExplorer 循环：读 data/registry.json 与 results/ 下各 run.json；按项目根 AGENTS.md 的调度纪律推进（复活/分派/补货），全部产物落盘。";
 
 const CHEATSHEET_LINES = [
   "MathExplorer: /mx 速查表 · /ask <命题> 猜想分诊 · /solve [id] 攻关 · /hunt [field] [quota] 补货 · /brief 简报 · /show <id> 看题",
-  "/stop 紧急制动 · /autorun on|off|status 无人值守 · data/seeds/ 丢.md录入 · data/STOP=总闸",
+  "/stop 紧急制动 · /autorun on|off|status 无人值守 · /chain on|off 链式推进 · data/seeds/ 丢.md录入 · data/STOP=总闸",
   "内置: /model 切模型 · /pause 暂停 · /collab 远程介入 · /reload-plugins 刷新命令 · Esc 中断当前轮",
 ];
 
@@ -271,6 +272,7 @@ export default function mathxAutorun(pi: ExtensionApi) {
       /* unknown snapshot: fall through cautiously */
     }
     if (existsSync(join(ctx.cwd, "data", "STOP"))) return;
+    if (!existsSync(join(ctx.cwd, "data", "CHAIN_ON"))) return; // chain gate: settle-and-report only
     if (!(await quotaGateOpen(ctx))) return;
     pi.sendUserMessage(CONTINUE_PROMPT);
   }
@@ -287,6 +289,23 @@ export default function mathxAutorun(pi: ExtensionApi) {
           "on" in entry.data
         ) {
           autorunOn = Boolean(entry.data.on);
+        }
+        // Sync the chain gate file with the last persisted chain decision.
+        if (
+          entry?.type === "custom" &&
+          entry?.customType === CHAIN_STATE_TYPE &&
+          entry.data &&
+          typeof entry.data === "object" &&
+          "on" in entry.data
+        ) {
+          const chainPath = join(ctx.cwd, "data", "CHAIN_ON");
+          try {
+            if (entry.data.on) {
+              if (!existsSync(chainPath)) writeFileSync(chainPath, new Date().toISOString() + "\n", "utf-8");
+            } else if (existsSync(chainPath)) {
+              unlinkSync(chainPath);
+            }
+          } catch { /* chain sync best-effort */ }
         }
       }
     } catch { /* state replay is best-effort */ }
@@ -434,6 +453,32 @@ export default function mathxAutorun(pi: ExtensionApi) {
       let text = blocks.join("\n\n----------\n\n");
       if (out.count > 5) text += `\n\n…共 ${out.count} 个匹配，仅显示前 5 个（请用更精确的 id/过滤条件）`;
       ctx.ui.notify(text, "info");
+    },
+  });
+
+  pi.registerCommand("chain", {
+    description: "链式推进开关：/chain on|off|status（on = 结算后自动派下一题；off = 仅汇报）",
+    handler: (args: string, ctx: ExtensionContext) => {
+      const sub = (args || "").trim() || "status";
+      const chainPath = join(ctx.cwd, "data", "CHAIN_ON");
+      if (sub === "on") {
+        try {
+          writeFileSync(chainPath, new Date().toISOString() + "\n", "utf-8");
+        } catch { /* best-effort */ }
+        pi.appendEntry(CHAIN_STATE_TYPE, { on: true });
+        ctx.ui.notify("链式推进: ON（结算后自动派下一题/复活/补货）", "info");
+        try {
+          if (ctx.isIdle()) pi.sendUserMessage(CONTINUE_PROMPT);
+        } catch { /* busy is fine */ }
+      } else if (sub === "off") {
+        try {
+          unlinkSync(chainPath);
+        } catch { /* already gone */ }
+        pi.appendEntry(CHAIN_STATE_TYPE, { on: false });
+        ctx.ui.notify("链式推进: OFF（结算照做，停止一切推进，仅汇报）", "info");
+      } else {
+        ctx.ui.notify(`链式推进: ${existsSync(chainPath) ? "ON" : "OFF"}`, "info");
+      }
     },
   });
 

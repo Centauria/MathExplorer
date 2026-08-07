@@ -50,7 +50,10 @@ def _utc_now() -> str:
 def _sanitize_problem_component(raw: str) -> str:
     cleaned = re.sub(r"\s+", "_", raw.strip())
     cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", cleaned)
-    cleaned = re.sub(r"_+", "_", cleaned).strip("._")
+    # Deliberate deviation from upstream Rethlas: strip only dots at the edges,
+    # preserving leading underscores — the project's `_control` namespace relies
+    # on them (upstream stripped "._", which silently relocated memory dirs).
+    cleaned = re.sub(r"_+", "_", cleaned).strip(".")
     return cleaned
 
 

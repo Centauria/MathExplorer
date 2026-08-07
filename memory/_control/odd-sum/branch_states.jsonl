@@ -1,0 +1,1 @@
+{"timestamp_utc": "2026-08-07T12:48:44.739774+00:00", "channel": "branch_states", "record": {"branch_id": "main", "state": {"state": "active", "plan_id": "plan-induction-1", "note": "Single-branch direct induction proof; both subgoals solved; assembling full blueprint for verification.", "iteration": 0}}}

@@ -1,11 +1,11 @@
 ---
 name: verify-proof
-description: Verify candidate proofs with the mathx.verify jury pipeline. Use only when a full candidate proof of the entire problem has been assembled in markdown, and before publishing the final verified blueprint.
+description: Verify candidate proofs with the cross-model referee panel + deterministic aggregator. Use only when a full candidate proof of the entire problem has been assembled in markdown, and before publishing the final verified blueprint.
 ---
 
 # Verify Proof
 
-Use the verification jury as the canonical verifier before accepting a solution.
+Use the referee panel as the canonical verifier before accepting a solution.
 Do not use this skill for partial proofs, isolated subgoals, or branches that have not yet produced a full proof draft of the whole problem.
 
 ## Input Contract
@@ -19,19 +19,27 @@ Read:
 ## Procedure
 
 1. Read the current `results/{problem_id}/blueprint.md` draft as pure text.
-2. First check that `blueprint.md` contains a full proof draft of the entire target theorem rather than a partial proof, fragment, or exploratory notes. If it does not, do not call the verifier yet.
-3. Run the jury:
-   `uv run python -m mathx.verify --problem <problem_id>`
-   It reads the statement and blueprint itself, checks external citations, runs the jurors in parallel, and writes `results/<problem_id>/verification.json` plus `jury/v{1,2,3}.json`. It may take several minutes; that is normal.
-4. Read `verification_report.summary`, `critical_errors`, `gaps`, `verdict`, and `repair_hints` from the command output (also persisted in `verification.json`).
-5. Persist exactly what the jury returns into the `verification_reports` memory channel. Do not rename keys, add keys, or change the JSON structure.
-6. Treat the proof as failed if any of the following hold:
+2. First check that `blueprint.md` contains a full proof draft of the entire target theorem rather than a partial proof, fragment, or exploratory notes. If it does not, do not call the referees yet.
+3. Spawn the three referees in ONE parallel `tasks[]` batch (each item carries its own `agent` field; task text is only the problem_id):
+   ```
+   tasks: [
+     {"agent": "referee-1", "task": "problem_id = <problem_id>"},
+     {"agent": "referee-2", "task": "problem_id = <problem_id>"},
+     {"agent": "referee-3", "task": "problem_id = <problem_id>"}
+   ]
+   ```
+   Each referee independently reads `prompts/verification/VERIFIER.md`, the statement, and the blueprint; checks external citations live (web_search + `mathx.leansearch` via bash); and writes `results/{problem_id}/referee/v{1,2,3}.json`. This may take several minutes; that is normal.
+4. Aggregate deterministically:
+   `uv run python -m mathx.aggregate <problem_id>`
+   The unanimous rule (all reports parseable and `"correct"` with zero `critical_errors` and zero `gaps`; an unparseable or missing report counts as wrong) is enforced by this code, not by judgment. It writes `results/{problem_id}/verification.json`.
+5. Read `verification_report.summary`, `critical_errors`, `gaps`, `verdict`, and `repair_hints` from the command output (also persisted in `verification.json`).
+6. Persist exactly what the aggregator returns into the `verification_reports` memory channel. Do not rename keys, add keys, or change the JSON structure.
+7. Treat the proof as failed if any of the following hold:
    - `verdict` is `"wrong"`
    - `verification_report.critical_errors` is non-empty
    - `verification_report.gaps` is non-empty
-7. Only treat the proof as passed when none of the failure conditions above hold.
-8. If the proof passes, rename `results/{problem_id}/blueprint.md` to `results/{problem_id}/blueprint_verified.md`.
-9. If `mathx.verify` exits with code 3 (no provider), fall back per the AGENTS.md mapping table: spawn 3 throwaway jurors SERIALLY via the task tool (task text = full `prompts/verification/VERIFIER.md` + Statement + Proof), aggregate per the unanimous rule, and write `verification.json` + `jury/v{1,2,3}.json` yourself.
+8. Only treat the proof as passed when none of the failure conditions above hold.
+9. If the proof passes, rename `results/{problem_id}/blueprint.md` to `results/{problem_id}/blueprint_verified.md`.
 
 ## Output Contract
 
@@ -53,17 +61,17 @@ Append to `verification_reports`:
 }
 ```
 
-Persist the jury response exactly as returned.
+Persist the aggregator response exactly as returned.
 
 If verification fails, revise `blueprint.md` directly and append to `failed_paths` when a branch is invalidated.
 
 ## Tools
 
-- `uv run python -m mathx.verify --problem <problem_id>`
+- `uv run python -m mathx.aggregate <problem_id>`
 - `uv run python -m mathx.memory append <problem_id> verification_reports @record.json`
 - `uv run python -m mathx.memory search <problem_id> "query" [--channels csv] [--limit 10]`
 - `uv run python -m mathx.memory branch <problem_id> <branch_id> @state.json`
-- your own `web_search` / `web_fetch` and `uv run python -m mathx.leansearch "query"` when the verifier identifies a missing lemma or gap
+- your own `web_search` / `web_fetch` and `uv run python -m mathx.leansearch "query"` when a referee identifies a missing lemma or gap
 
 ## Failure Logging
 

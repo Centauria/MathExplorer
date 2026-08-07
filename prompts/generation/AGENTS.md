@@ -53,7 +53,7 @@ Run all commands from the repository root. All `mathx` CLIs print JSON on stdout
 | `memory_search(problem_id, query, channels, limit)` | `uv run python -m mathx.memory search <problem_id> "query" [--channels csv] [--limit 10]` |
 | `branch_update(problem_id, branch_id, state)` | `uv run python -m mathx.memory branch <problem_id> <branch_id> @state.json` |
 | `search_arxiv_theorems(query, num_results)` | `uv run python -m mathx.leansearch "query" [--num 10]` (exit code 2 = service down → fall back to your own web_search) |
-| `verify_proof_service(statement, proof)` | `uv run python -m mathx.verify --problem <problem_id>` — it reads `data/problems/<problem_id>.md` and `results/<problem_id>/blueprint.md` itself, runs a 3-juror jury, and writes `verification.json` + `jury/v{1,2,3}.json` |
+| `verify_proof_service(statement, proof)` | spawn the 3 omp referees, then aggregate — see the Verification section below |
 | Codex sub-agents (`spawn_agent`, `send_input`, `wait_agent`, `close_agent`) | write one task per decomposition plan into a single `tasks.json` (each task carries `"role": "prover"`), then `uv run python -m mathx.fleet tasks.json -o out.json` and read `out.json` |
 | Codex built-in web search | your own `web_search` / `web_fetch` tools |
 
@@ -67,10 +67,28 @@ Sub-agent (fleet task) contract for recursive proving — each task prompt must 
 
 Fleet sub-agents have NO network access and do NOT write to memory — you persist their reports into the appropriate memory channels yourself.
 
-No-provider fallback (`mathx.fleet` / `mathx.verify` exit code 3 means config.toml missing, quota exhausted, or all keys rejected):
+No-provider fallback (`mathx.fleet` exit code 3 means config.toml missing, quota exhausted, or all keys rejected):
 
 - **Subgoal assault**: skip the fleet batch; work each plan yourself, sequentially, as an ordinary direct/recursive proving loop.
-- **Verification jury**: use the task tool to spawn 3 throwaway jurors SERIALLY (each task text = the full text of `prompts/verification/VERIFIER.md` + the Statement + the Proof; omp sub-agents have web_search, so citation checking happens live, replacing the appendix). The unanimous-pass rule and the verdict JSON schema are unchanged; aggregate the three reports and write `results/<problem_id>/verification.json` and `jury/v{1,2,3}.json` yourself. Serial spawning is required by the project concurrency policy (multi-instance parallelism goes through the config.toml fleet only).
+- **Verification**: the referee panel (below) does not use `mathx.fleet`; it is unaffected by this fallback.
+
+## Verification (referee panel)
+
+When — and only when — a full proof of the whole problem has been assembled in `results/<problem_id>/blueprint.md` (never on partial proofs, incomplete branches, isolated lemmas, or drafts with no real progress on the full theorem):
+
+1. Spawn the three referees in ONE parallel `tasks[]` batch. Each task item MUST carry its own `agent` field; the task text is just the problem_id (the agent definition contains the full instructions). Skeleton:
+   ```
+   tasks: [
+     {"agent": "referee-1", "task": "problem_id = <problem_id>"},
+     {"agent": "referee-2", "task": "problem_id = <problem_id>"},
+     {"agent": "referee-3", "task": "problem_id = <problem_id>"}
+   ]
+   ```
+   Each referee reads `prompts/verification/VERIFIER.md`, the statement, and the blueprint; checks external citations live (web_search + leansearch); and writes `results/<problem_id>/referee/v{1,2,3}.json`.
+2. Aggregate deterministically: `uv run python -m mathx.aggregate <problem_id>` — the unanimous rule (all parseable-and-correct, zero critical_errors, zero gaps) lives in this code, not in anyone's judgment. It writes `results/<problem_id>/verification.json`.
+3. Persist the aggregate result into the `verification_reports` memory channel verbatim.
+4. Pass → rename `blueprint.md` to `blueprint_verified.md`, then `uv run python -m mathx.runstate stop <problem_id> solved`.
+5. Fail → persist the repair_hints into `failed_paths`, repair the proof, and re-verify only after a genuinely complete revised proof exists.
 
 ## Required Memory Policy
 
@@ -223,9 +241,7 @@ If `$search-math-results` identifies a useful paper, download it inside the repo
 If `$search-math-results` identifies a useful theorem, read the proof of that theorem as well and extract any techniques or ideas that may help with the current statement.
 When considering an external theorem from a paper, expand the definitions and concepts in that theorem using the paper's own context and terminology, and check carefully that the theorem is actually applicable to the current situation.
 If extensive retrieval still does not yield useful support, stop relying on search and continue the proof attempt through deep independent reasoning and the other provided skills.
-Use `mathx.verify` for proof verification instead of relying on model-only checking.
-Only run `mathx.verify` when a full proof of the whole problem has been assembled in `blueprint.md`. Do not call it on partial proofs, incomplete branches, isolated lemmas, or drafts that have made no real progress on the full theorem.
-`mathx.verify` runs the full citation-check + 3-juror pipeline and may take several minutes; that is normal.
+Use the referee panel (Verification section above) for proof verification instead of relying on model-only checking — and only on a genuinely complete proof.
 
 ## Output Contract
 

@@ -36,10 +36,12 @@ import argparse
 import asyncio
 import itertools
 import json
+import os
 import sys
 
 import httpx
 import uvicorn
+from pathlib import Path
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
@@ -256,6 +258,9 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"error": str(e)}, ensure_ascii=False), file=sys.stderr)
         return 1
     app = make_app(cfg)
+    pid_path = Path(__file__).resolve().parents[1] / "logs" / "gateway.pid"
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.write_text(str(os.getpid()), encoding="utf-8")
     print(f"mathx.gateway listening on http://{args.host}:{args.port} (providers: {', '.join(cfg.providers)})")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0

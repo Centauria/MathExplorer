@@ -62,7 +62,7 @@ interface ExtensionContext {
 }
 
 interface ExtensionApi {
-  on(event: "session_start" | "input", handler: (event: unknown, ctx: ExtensionContext) => void | Promise<void>): void;
+  on(event: "session_start" | "input" | "session_shutdown", handler: (event: unknown, ctx: ExtensionContext) => void | Promise<void>): void;
   registerCommand(
     name: string,
     def: {
@@ -306,6 +306,24 @@ export default function mathxAutorun(pi: ExtensionApi) {
         ctx.ui.notify("mathx gateway (:8399) 未运行，已在后台启动", "info");
       }
     } catch { /* gateway optional; worker spawns will fail visibly if it stays down */ }
+
+    // Die-with-omp semantics: on session shutdown, kill the gateway we (or a
+    // previous session) started — but only if it actually answers on :8399
+    // (guards against stale pid files and PID recycling).
+    pi.on("session_shutdown", async (_e: unknown, ctx: ExtensionContext) => {
+      try {
+        const pidText = readFileSync(join(ctx.cwd, "logs", "gateway.pid"), "utf-8").trim();
+        const gwUp = await fetch("http://127.0.0.1:8399/healthz", { signal: AbortSignal.timeout(1200) })
+          .then((r) => r.ok)
+          .catch(() => false);
+        if (gwUp && /^\d+$/.test(pidText)) {
+          await execLine(`taskkill /PID ${pidText} /T /F`);
+        }
+        try {
+          unlinkSync(join(ctx.cwd, "logs", "gateway.pid"));
+        } catch { /* already gone */ }
+      } catch { /* shutdown best-effort */ }
+    });
 
     ctx.setInterval(() => {
       tick(ctx).catch(() => { /* contained by ctx.setInterval already; belt and braces */ });

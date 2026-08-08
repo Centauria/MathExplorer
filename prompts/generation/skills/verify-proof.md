@@ -20,6 +20,7 @@ Read:
 
 1. Read the current `results/{problem_id}/blueprint.md` draft as pure text.
 2. First check that `blueprint.md` contains a full proof draft of the entire target theorem rather than a partial proof, fragment, or exploratory notes. If it does not, do not call the referees yet.
+3. Demand-coverage gate: read the problem's Statement and check that the main theorem's conclusion actually settles what the Statement demands (exactly what VERIFIER.md Phase 2.5 will check). In particular, if the conclusion merely restates the problem as open/unknown (e.g. "the exact value remains an open problem" when the Statement asks for the exact value), or establishes only bounds/numerics/partial cases without the demanded claim, do NOT spawn the referees — the panel would be guaranteed to fail and is wasted. Instead return to the proving loop and keep working toward the demand, or preserve progress and stall at the iteration cap.
 3. Spawn the three referees in ONE parallel `tasks[]` batch (each item carries its own `agent` field; task text is only the problem_id):
    ```
    tasks: [

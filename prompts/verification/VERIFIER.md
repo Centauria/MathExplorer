@@ -32,6 +32,25 @@ Pay special attention to assumptions saying that an object exists or satisfies s
 
 Audit whether the assumptions from `Statement` are actually used in the proof. If some assumptions appear unused, reason carefully before classifying them: genuinely redundant, or a missing necessary argument (and therefore a gap or error)?
 
+## Phase 2.5 — Demand coverage: does the proof answer the problem?
+
+The Statement is a problem with a demand, not just a set of claims: it asks the proof to establish a statement, determine/construct an object or exact value, or decide a conjecture. Soundness of every individual claim is NOT enough — the main theorem must actually RESOLVE the demand.
+
+1. In Phase 1 you extracted the assumptions; now also extract the demanded claim/object explicitly:
+   - "Prove X" / "Show that X" → the proof must establish X.
+   - "Determine / compute / find the exact value of Y" → the proof must give Y exactly (explicit formula, closed form, or characterization), or prove Y does not exist / is not expressible in the requested class. Bounds, numerical estimates, asymptotics, and existence theorems alone do NOT determine Y.
+   - A yes/no conjecture ("is Z true?") → a proof or a disproof settles it; side facts without a verdict do not.
+   - A Statement that itself says "the exact value of Y is unknown" is asking to find Y. A proof whose conclusion repeats "the exact value of Y remains open/unknown" does NOT resolve it — it returns the problem unanswered.
+
+2. Read the main theorem (its statement is the original problem statement, per generation rule 13) and the proof's final summary. Check whether the conclusion establishes the demanded claim/object.
+
+3. Record a gap (location: the main theorem or final summary) when the proof is internally sound but does not settle the demand, e.g.:
+   - the conclusion explicitly leaves the demanded object open/unknown;
+   - the proof establishes only auxiliary facts (bounds, numerics, partial cases, existence, related conjectures) that fall short of the demand;
+   - the proof resolves a different question than the one asked.
+
+A disproof of a demanded conjecture counts as a resolution. Proving an equivalent reformulation counts only if the equivalence is proved in the same document. Do not downgrade a coverage gap to a minor observation: an unanswered problem is not a solved problem, however correct the partial results are.
+
 ## Phase 3 — External reference checking
 
 For each citation the proof makes, retrieve and check it yourself:
@@ -46,14 +65,14 @@ For each citation the proof makes, retrieve and check it yourself:
 
 ## Phase 4 — Report and verdict
 
-Aggregate every error and gap across the full markdown proof. Do not drop any finding.
+Aggregate every error and gap across the full markdown proof, including coverage gaps from Phase 2.5. Do not drop any finding.
 
 - `critical_errors`: incorrect logic, theorem misuse, contradiction, wrong referenced theorem. Each item: `{"location": "...", "issue": "..."}`.
 - `gaps`: skipped derivations, vague arguments, missing intermediate justification, unjustified existence or property assumptions about objects, suspiciously unused assumptions whose role is not justified, hand-wavy deductions from one property to another without checking the exact definitions, unresolved external references per Phase 3 rule 7. Each item: `{"location": "...", "issue": "..."}`.
 
 Strict verdict rule: return `"correct"` if and only if both `critical_errors` and `gaps` are empty. Otherwise return `"wrong"`.
 
-If verdict is `"correct"`, set `"repair_hints"` to `""`. If verdict is `"wrong"`, provide concrete non-empty hints to repair each major issue.
+If verdict is `"correct"`, set `"repair_hints"` to `""`. If verdict is `"wrong"`, provide concrete non-empty hints to repair each major issue. When the findings are only coverage gaps (Phase 2.5), the hints must state that the demanded claim is not established and name exactly what remains to be proved — not just point at internal logic.
 
 ## Output contract
 

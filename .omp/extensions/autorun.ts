@@ -24,7 +24,7 @@ const CONTINUE_PROMPT =
   "检查 MathExplorer 循环：读 data/registry.json 与 results/ 下各 run.json；按项目根 AGENTS.md 的调度纪律推进（复活/分派/补货），全部产物落盘。";
 
 const CHEATSHEET_LINES = [
-  "MathExplorer: /mx 速查表 · /ask <命题> 猜想分诊 · /solve [id] 攻关 · /hunt [field] [quota] 补货 · /brief 简报 · /show <id> 看题",
+  "MathExplorer: /mx 速查表 · /ask <命题> 猜想分诊 · /solve [id] 攻关 · /hunt [field] [quota] 补货 · /brief 简报 · /show <id前缀> 直接看题 · /show 菜单浏览过滤",
   "/stop 紧急制动 · /autorun on|off|status 无人值守 · /chain on|off 链式推进 · data/seeds/ 丢.md录入 · data/STOP=总闸",
   "内置: /model 切模型 · /pause 暂停 · /collab 远程介入 · /reload-plugins 刷新命令 · Esc 中断当前轮",
 ];
@@ -45,6 +45,12 @@ interface UiContext {
   ): void;
   input(prompt: string, defaultValue?: string): Promise<string | undefined>;
   confirm(message: string): Promise<boolean>;
+  select(
+    title: string,
+    options: (string | { label: string; description?: string })[],
+    dialogOptions?: { helpText?: string; initialIndex?: number; signal?: AbortSignal },
+  ): Promise<string | undefined>;
+  editor(title: string, prefill?: string): Promise<string | undefined>;
 }
 
 interface SessionEntry {
@@ -374,7 +380,7 @@ export default function mathxAutorun(pi: ExtensionApi) {
     },
   });
 
-  // ---- /show: inspect recorded problems; Tab-completes ids, fields, statuses ----
+  // ---- /show: inspect recorded problems; interactive menu + direct id lookup ----
   const SHOW_STATUSES = ["queued", "exploring", "solved", "falsified", "stalled"];
   interface RegistryEntryLite {
     id: string;
@@ -394,7 +400,7 @@ export default function mathxAutorun(pi: ExtensionApi) {
       entries = (reg.problems ?? []).map((p: RegistryEntryLite) => ({
         id: p.id, title: p.title, status: p.status, tractability: p.tractability, field: p.field,
       }));
-    } catch { /* registry unreadable: complete with flags only */ }
+    } catch { /* registry unreadable: fields only */ }
     try {
       fields = readFileSync(join(process.cwd(), "data", "fields.txt"), "utf-8")
         .split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
@@ -410,20 +416,117 @@ export default function mathxAutorun(pi: ExtensionApi) {
     problems?: { entry: RegistryEntryLite; statement: string | null }[];
   }
 
+  /** Legacy rendering: notify the first 5 matches (headless fallback & no-select guard). */
+  async function renderShowResults(ctx: ExtensionContext, tokens: string[]): Promise<void> {
+    const r = await execMathx(["mathx.harvest", "show", ...tokens]);
+    if (!r.ok) {
+      ctx.ui.notify(`show 失败: ${r.text.trim().slice(0, 300)}`, "error");
+      return;
+    }
+    let out: ShowOutput;
+    try {
+      out = JSON.parse(r.text) as ShowOutput;
+    } catch {
+      ctx.ui.notify(r.text.trim().slice(0, 500) || "(empty show output)", "info");
+      return;
+    }
+    if (out.ambiguous) {
+      const lines = (out.matches ?? []).map((m) => `  ${m.id} — ${m.title}`);
+      ctx.ui.notify(`前缀不唯一，匹配 ${lines.length} 个:\n${lines.join("\n")}`, "warning");
+      return;
+    }
+    const problems = out.problems ?? [];
+    if (!out.count || problems.length === 0) {
+      ctx.ui.notify("没有匹配的问题", "warning");
+      return;
+    }
+    const blocks = problems.slice(0, 5).map((p) => {
+      const e = p.entry;
+      const body = String(p.statement ?? "(no statement file)").replace(/^---[\s\S]*?---\s*/, "").trim();
+      return `## ${e.title}\n${e.id} · ${e.status} · tractability=${e.tractability}\n\n${body}`;
+    });
+    let text = blocks.join("\n\n----------\n\n");
+    if (out.count > 5) text += `\n\n…共 ${out.count} 个匹配，仅显示前 5 个（请用更精确的 id/过滤条件）`;
+    ctx.ui.notify(text, "info");
+  }
+
+  /**
+   * Interactive browse menu: type-to-search across id/title/status/field, filter by
+   * status/field inside the menu, preview full statements in a read-only editor.
+   * Filter state lives only for this menu session; Esc discards it. Read-only:
+   * never touches data/ files beyond the registry cache.
+   */
+  async function interactiveMenu(
+    ctx: ExtensionContext,
+    preset?: { status?: string; field?: string },
+  ): Promise<void> {
+    // Guard: older omp builds may lack select/editor — fall back to the legacy notify path.
+    if (typeof ctx.ui.select !== "function" || typeof ctx.ui.editor !== "function") {
+      await renderShowResults(ctx, []);
+      return;
+    }
+    const STATUS_LABEL = "⚙ 按状态过滤…";
+    const FIELD_LABEL = "⚙ 按领域过滤…";
+    let statusF = preset?.status ?? "全部";
+    let fieldF = preset?.field ?? "全部";
+    for (;;) {
+      const { entries, fields } = loadShowRegistry();
+      const filtered = entries.filter(
+        (e) => (statusF === "全部" || e.status === statusF) && (fieldF === "全部" || e.field === fieldF),
+      );
+      const title = `查看问题 · ${statusF} · ${fieldF} · ${filtered.length}/${entries.length} 题`;
+      const items: { label: string; description?: string }[] = [
+        { label: STATUS_LABEL, description: `当前：${statusF}` },
+        { label: FIELD_LABEL, description: `当前：${fieldF}` },
+        ...filtered.map((e) => ({
+          label: e.id,
+          description: `[${e.status}|t${e.tractability}] ${e.title} · ${e.field}`,
+        })),
+      ];
+      const picked = await ctx.ui.select(title, items, {
+        helpText: "↑↓ 导航 · 打字搜索(id/标题/状态/领域) · Enter 选中 · Esc 退出",
+      });
+      if (picked === undefined) return; // Esc → leave the menu entirely
+      if (picked === STATUS_LABEL) {
+        const s = await ctx.ui.select("按状态过滤", ["全部", ...SHOW_STATUSES]);
+        if (s !== undefined) statusF = s;
+        continue;
+      }
+      if (picked === FIELD_LABEL) {
+        const f = await ctx.ui.select("按领域过滤", ["全部", ...fields]);
+        if (f !== undefined) fieldF = f;
+        continue;
+      }
+      // picked is a problem id → preview the full statement, then return to the menu.
+      const r = await execMathx(["mathx.harvest", "show", picked]);
+      if (!r.ok) {
+        ctx.ui.notify(`show 失败: ${r.text.trim().slice(0, 300)}`, "error");
+        continue;
+      }
+      let out: ShowOutput;
+      try {
+        out = JSON.parse(r.text) as ShowOutput;
+      } catch {
+        continue;
+      }
+      const p = out.problems?.[0];
+      if (!p) continue;
+      const e = p.entry;
+      const body = String(p.statement ?? "(no statement file)").replace(/^---[\s\S]*?---\s*/, "").trim();
+      const text = `${e.title}\n${e.id} · ${e.status} · tractability=${e.tractability}\n\n${body}`;
+      await ctx.ui.editor(`${e.id}  [${e.status}|t${e.tractability}]（Enter/Esc 关闭，不回写）`, text);
+      // loop continues → menu reappears with filters intact
+    }
+  }
+
   pi.registerCommand("show", {
-    description: "查看已记录问题：/show <id前缀|status|field> 或 /show --field <f> --status <s>",
+    description: "查看已记录问题：/show <id前缀> 直接看题；/show 交互菜单浏览过滤",
     getArgumentCompletions: (prefix: string) => {
       const { entries, fields } = loadShowRegistry();
       const p = (prefix || "").toLowerCase();
       const items: { value: string; label: string; description?: string }[] = [];
-      for (const flag of ["--field", "--status"]) {
-        if (flag.startsWith(p)) items.push({ value: flag, label: flag });
-      }
       for (const f of fields) {
-        if (f.toLowerCase().startsWith(p)) items.push({ value: f, label: f, description: "field" });
-      }
-      for (const s of SHOW_STATUSES) {
-        if (s.startsWith(p)) items.push({ value: s, label: s, description: "status" });
+        if (f.toLowerCase().startsWith(p)) items.push({ value: `${f}/`, label: `${f}/`, description: "kind" });
       }
       for (const e of entries) {
         if (e.id.toLowerCase().includes(p) || e.title.toLowerCase().includes(p)) {
@@ -434,36 +537,46 @@ export default function mathxAutorun(pi: ExtensionApi) {
     },
     handler: async (args: string, ctx: ExtensionContext) => {
       const tokens = (args || "").trim().split(/\s+/).filter(Boolean);
-      const r = await execMathx(["mathx.harvest", "show", ...tokens]);
-      if (!r.ok) {
-        ctx.ui.notify(`show 失败: ${r.text.trim().slice(0, 300)}`, "error");
+
+      // no arguments → interactive menu (headless: legacy notify path)
+      if (tokens.length === 0) {
+        if (!ctx.hasUI) {
+          await renderShowResults(ctx, []);
+          return;
+        }
+        await interactiveMenu(ctx);
         return;
       }
-      let out: ShowOutput;
-      try {
-        out = JSON.parse(r.text) as ShowOutput;
-      } catch {
-        ctx.ui.notify(r.text.trim().slice(0, 500) || "(empty show output)", "info");
+
+      // legacy --flags are no longer forwarded: point into the menu instead
+      if (tokens.some((t) => t.startsWith("--"))) {
+        if (ctx.hasUI) {
+          ctx.ui.notify("过滤参数已移至交互菜单：直接 /show 后选择状态/领域过滤", "info");
+          await interactiveMenu(ctx);
+        } else {
+          ctx.ui.notify("用法：/show <id前缀> 直接看题；/show 交互浏览（过滤在菜单中）", "warning");
+        }
         return;
       }
-      if (out.ambiguous) {
-        const lines = (out.matches ?? []).map((m) => `  ${m.id} — ${m.title}`);
-        ctx.ui.notify(`前缀不唯一，匹配 ${lines.length} 个:\n${lines.join("\n")}`, "warning");
-        return;
+
+      // single bare status/field word → menu with that filter preset
+      if (tokens.length === 1) {
+        const t = tokens[0];
+        const { fields } = loadShowRegistry();
+        if (SHOW_STATUSES.includes(t)) {
+          if (ctx.hasUI) await interactiveMenu(ctx, { status: t });
+          else ctx.ui.notify("过滤已移至 /show 交互菜单", "info");
+          return;
+        }
+        if (fields.includes(t)) {
+          if (ctx.hasUI) await interactiveMenu(ctx, { field: t });
+          else ctx.ui.notify("过滤已移至 /show 交互菜单", "info");
+          return;
+        }
       }
-      const problems = out.problems ?? [];
-      if (!out.count || problems.length === 0) {
-        ctx.ui.notify("没有匹配的问题", "warning");
-        return;
-      }
-      const blocks = problems.slice(0, 5).map((p) => {
-        const e = p.entry;
-        const body = String(p.statement ?? "(no statement file)").replace(/^---[\s\S]*?---\s*/, "").trim();
-        return `## ${e.title}\n${e.id} · ${e.status} · tractability=${e.tractability}\n\n${body}`;
-      });
-      let text = blocks.join("\n\n----------\n\n");
-      if (out.count > 5) text += `\n\n…共 ${out.count} 个匹配，仅显示前 5 个（请用更精确的 id/过滤条件）`;
-      ctx.ui.notify(text, "info");
+
+      // everything else: id-prefix direct lookup, legacy rendering preserved
+      await renderShowResults(ctx, tokens);
     },
   });
 

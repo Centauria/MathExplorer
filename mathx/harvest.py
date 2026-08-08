@@ -49,7 +49,7 @@ DEFAULT_FIELDS = [
     "analysis",
     "algebra",
     "geometry-topology",
-    "probability",
+    "probability-theory",
     "logic-foundations",
     "dynamical-systems",
     "computational-math",
@@ -205,6 +205,7 @@ def _dedup_judge(candidate: dict, matches: list[dict]) -> bool | None:
                 [{"role": "system", "content": DEDUP_SYSTEM}, {"role": "user", "content": user}],
                 role="judge",
                 index=0,
+                timeout=30.0,
             )
         )
     except NoProviderError:

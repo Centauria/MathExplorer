@@ -15,7 +15,7 @@
 
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 const STATE_TYPE = "mathx.autorun.state";
 const CHAIN_STATE_TYPE = "mathx.chain.state";
@@ -24,7 +24,7 @@ const CONTINUE_PROMPT =
   "检查 MathExplorer 循环：读 data/registry.json 与 results/ 下各 run.json；按项目根 AGENTS.md 的调度纪律推进（复活/分派/补货），全部产物落盘。";
 
 const CHEATSHEET_LINES = [
-  "MathExplorer: /mx 速查表 · /ask <命题> 猜想分诊 · /solve [id] 攻关 · /hunt [field] [quota] 补货 · /brief 简报 · /show <id前缀> 直接看题 · /show 菜单浏览过滤",
+  "MathExplorer: /mx 速查表 · /ask <命题> 猜想分诊 · /solve [id] 攻关 · /hunt [field] [quota] 补货 · /brief 简报 · /show <id前缀> 看题 · /solution <id前缀> 看题解 · 菜单浏览过滤",
   "/stop 紧急制动 · /autorun on|off|status 无人值守 · /chain on|off 链式推进 · data/seeds/ 丢.md录入 · data/STOP=总闸",
   "内置: /model 切模型 · /pause 暂停 · /collab 远程介入 · /reload-plugins 刷新命令 · Esc 中断当前轮",
 ];
@@ -51,6 +51,7 @@ interface UiContext {
     dialogOptions?: { helpText?: string; initialIndex?: number; signal?: AbortSignal },
   ): Promise<string | undefined>;
   editor(title: string, prefill?: string): Promise<string | undefined>;
+  custom?<T>(factory: (...runtimeArgs: unknown[]) => unknown, options?: { overlay?: boolean }): Promise<T>;
 }
 
 interface SessionEntry {
@@ -187,6 +188,14 @@ export default function mathxAutorun(pi: ExtensionApi) {
   let autorunOn = false;
   let quotaSkips = 0;
   let cheatsheetShown = false;
+
+  // Preferred clipboard path: omp's native arboard binding (sync, Unicode-safe).
+  // Unverified whether project extensions can resolve this package — the
+  // PowerShell fallback in copyTextSync covers failure. Fire-and-forget pre-warm.
+  let nativesCopy: ((text: string) => void) | null = null;
+  import("@oh-my-pi/pi-natives/clipboard")
+    .then((m) => { nativesCopy = (m as { copyToClipboard: (t: string) => void }).copyToClipboard; })
+    .catch(() => { /* not resolvable from extensions → PowerShell fallback */ });
 
   function showCheatsheet(ctx: ExtensionContext): void {
     try {
@@ -416,6 +425,30 @@ export default function mathxAutorun(pi: ExtensionApi) {
     problems?: { entry: RegistryEntryLite; statement: string | null }[];
   }
 
+  interface SolutionProblem {
+    entry: RegistryEntryLite;
+    verified_file: string;
+    verified: string | null;
+    draft_file: string;
+    draft: string | null;
+    verification_file: string;
+    verification: {
+      verdict?: string;
+      verification_report?: {
+        summary?: string;
+        critical_errors?: { location: string; issue: string }[];
+        gaps?: { location: string; issue: string }[];
+      };
+    } | null;
+    run: { status?: string; iteration?: number; max_iterations?: number; phase?: string } | null;
+  }
+  interface SolutionOutput {
+    ambiguous?: boolean;
+    matches?: { id: string; title: string }[];
+    count?: number;
+    problems?: SolutionProblem[];
+  }
+
   /** Legacy rendering: notify the first 5 matches (headless fallback & no-select guard). */
   async function renderShowResults(ctx: ExtensionContext, tokens: string[]): Promise<void> {
     const r = await execMathx(["mathx.harvest", "show", ...tokens]);
@@ -443,11 +476,259 @@ export default function mathxAutorun(pi: ExtensionApi) {
     const blocks = problems.slice(0, 5).map((p) => {
       const e = p.entry;
       const body = String(p.statement ?? "(no statement file)").replace(/^---[\s\S]*?---\s*/, "").trim();
-      return `## ${e.title}\n${e.id} · ${e.status} · tractability=${e.tractability}\n\n${body}`;
+      const solvedPtr = e.status === "solved" ? `\n\n（已解决 · 题解：/solution ${e.id}）` : "";
+      return `## ${e.title}\n${e.id} · ${e.status} · tractability=${e.tractability}\n\n${body}${solvedPtr}`;
     });
     let text = blocks.join("\n\n----------\n\n");
     if (out.count > 5) text += `\n\n…共 ${out.count} 个匹配，仅显示前 5 个（请用更精确的 id/过滤条件）`;
     ctx.ui.notify(text, "info");
+  }
+
+  /** Verdict summary + full proof text for one resolved problem. */
+  function renderSolutionText(p: SolutionProblem): string {
+    const e = p.entry;
+    const head = `${e.title}\n${e.id} · ${e.status} · tractability=${e.tractability}`;
+    let verdictBlock: string;
+    if (p.verification) {
+      const rep = p.verification.verification_report ?? {};
+      verdictBlock =
+        `=== 裁决（${p.verification_file}）===\n` +
+        `verdict: ${p.verification.verdict ?? "?"} · critical_errors=${(rep.critical_errors ?? []).length} · gaps=${(rep.gaps ?? []).length}\n\n` +
+        `${rep.summary ?? "(no summary)"}`;
+    } else {
+      verdictBlock = "=== 裁决 ===\n尚无 verification.json（未跑过三裁判验证）";
+    }
+    let proofBlock: string;
+    if (p.verified !== null) {
+      proofBlock = `=== 证明（${p.verified_file}）===\n\n${p.verified}`;
+    } else if (p.draft !== null) {
+      proofBlock = `=== 草稿（${p.draft_file}，未通过验证）===\n\n${p.draft}`;
+    } else {
+      const runInfo = p.run
+        ? `进度：iteration ${p.run.iteration ?? "?"}/${p.run.max_iterations ?? "?"} · phase=${p.run.phase ?? "?"} · ${p.run.status ?? "?"}`
+        : "results/ 下无任何产物";
+      proofBlock = `=== 题解 ===\n尚无 blueprint（${runInfo}）`;
+    }
+    return `${head}\n\n${verdictBlock}\n\n${proofBlock}`;
+  }
+
+  /** Sync copy so one keypress completes and the footer updates on the same render. */
+  function copyTextSync(text: string): boolean {
+    if (nativesCopy) {
+      try { nativesCopy(text); return true; } catch { /* fall through to shell */ }
+    }
+    if (process.platform === "win32") {
+      // clip.exe mangles non-ASCII (codepage); PowerShell Set-Clipboard + UTF-8 temp file is safe.
+      const tmp = join(process.env.TEMP || ".", `mathx-clip-${process.pid}-${Date.now()}.txt`);
+      try {
+        writeFileSync(tmp, text, "utf-8");
+        const r = spawnSync(
+          "powershell",
+          ["-NoProfile", "-NonInteractive", "-Command",
+           `Get-Content -Raw -Encoding UTF8 '${tmp.replace(/'/g, "''")}' | Set-Clipboard`],
+          { stdio: "ignore", windowsHide: true },
+        );
+        return r.status === 0;
+      } catch { return false; }
+      finally { try { unlinkSync(tmp); } catch { /* best-effort */ } }
+    }
+    return false;
+  }
+
+  // East Asian Wide/Fullwidth ranges → display width 2; everything else 1.
+  const WIDE_CHAR = /[ᄀ-ᅟ⺀-鿿ꥠ-꥿가-힣豈-﫿︰-﹏＀-｠￠-￦]/;
+
+  /** Read-only scrollable viewer; c / Ctrl+O copies the full text, s swaps
+   *  statement ⇄ solution when an alternate view exists, Esc/Enter/q closes. */
+  class TextViewer {
+    private logical: string[];
+    private wrapped: string[] = [];
+    private wrappedWidth = -1;
+    private offset = 0;
+    private copyNote = "";
+    private showingB = false;
+    private viewA: { title: string; text: string };
+    private viewB: { title: string; text: string } | null;
+    constructor(
+      title: string,
+      text: string,
+      private done: (v: undefined) => void,
+      alternate: { title: string; text: string } | null = null,
+      private requestRender: (() => void) | null = null,
+    ) {
+      this.viewA = { title, text };
+      this.viewB = alternate;
+      this.logical = text.replace(/\t/g, "    ").split("\n");
+    }
+    private currentView(): { title: string; text: string } {
+      return this.showingB && this.viewB ? this.viewB : this.viewA;
+    }
+    private swap(): void {
+      if (!this.viewB) return;
+      this.showingB = !this.showingB;
+      this.logical = this.currentView().text.replace(/\t/g, "    ").split("\n");
+      this.offset = 0;
+      this.copyNote = "";
+      this.wrappedWidth = -1;
+      this.requestRender?.();
+    }
+    private wrap(width: number): string[] {
+      if (this.wrappedWidth === width) return this.wrapped;
+      const out: string[] = [];
+      for (const line of this.logical) {
+        if (line.length === 0) { out.push(""); continue; }
+        let cur = "", curW = 0;
+        for (const ch of line) {
+          const w = WIDE_CHAR.test(ch) ? 2 : 1;
+          if (curW + w > width) { out.push(cur); cur = ""; curW = 0; }
+          cur += ch; curW += w;
+        }
+        out.push(cur);
+      }
+      this.wrapped = out;
+      this.wrappedWidth = width;
+      return out;
+    }
+    private pageSize(): number {
+      return Math.max(5, (process.stdout.rows || 24) - 6);
+    }
+    handleInput(data: string): void {
+      const page = this.pageSize();
+      const maxOff = Math.max(0, this.wrapped.length - page);
+      if (data === "\x1b" || data === "\r" || data === "q") { this.done(undefined); return; }
+      if (data === "c" || data === "\x0f") {
+        const text = this.logical.join("\n");
+        this.copyNote = copyTextSync(text)
+          ? `✓ 已复制 ${text.length} 字符 `
+          : "✗ 复制失败 ";
+        this.requestRender?.();
+        return;
+      }
+      if (data === "s") { this.swap(); return; }
+      if (data === "\x1b[A") this.offset = Math.max(0, this.offset - 1);
+      else if (data === "\x1b[B") this.offset = Math.min(maxOff, this.offset + 1);
+      else if (data === "\x1b[5~") this.offset = Math.max(0, this.offset - page);
+      else if (data === "\x1b[6~") this.offset = Math.min(maxOff, this.offset + page);
+      else if (data === "\x1b[H" || data === "\x1b[1~") this.offset = 0;
+      else if (data === "\x1b[F" || data === "\x1b[4~") this.offset = maxOff;
+      this.requestRender?.();
+    }
+    render(width: number): readonly string[] {
+      const w = Math.max(20, width);
+      const body = this.wrap(w);
+      const page = this.pageSize();
+      const maxOff = Math.max(0, body.length - page);
+      this.offset = Math.min(this.offset, maxOff);
+      const view = body.slice(this.offset, this.offset + page);
+      while (view.length < page) view.push("");
+      const rule = "─".repeat(w);
+      const toggleHint = this.viewB ? "s 切换 · " : "";
+      const foot =
+        `${this.copyNote}c/Ctrl+O 复制全文 · ${toggleHint}↑↓ PgUp/PgDn 滚动 · Esc 关闭 · ` +
+        `${this.offset + 1}-${Math.min(this.offset + page, body.length)}/${body.length}`;
+      return [` ${this.currentView().title}`.slice(0, w), rule, ...view, rule, foot.slice(0, w)];
+    }
+  }
+
+  /** Unified preview: custom viewer (copy chord + view swap) → editor dialog → truncated notify. */
+  async function previewText(
+    ctx: ExtensionContext,
+    title: string,
+    text: string,
+    alternate: { title: string; text: string } | null = null,
+  ): Promise<void> {
+    if (typeof ctx.ui.custom === "function") {
+      try {
+        await ctx.ui.custom<undefined>((...runtimeArgs: unknown[]) => {
+          const done = runtimeArgs[3];
+          if (typeof done !== "function") throw new Error("custom UI done callback unavailable");
+          const tui = runtimeArgs[0];
+          const requestRender =
+            tui && typeof tui === "object" && typeof (tui as { requestRender?: unknown }).requestRender === "function"
+              ? () => (tui as { requestRender: () => void }).requestRender()
+              : null;
+          return new TextViewer(title, text, done as (v: undefined) => void, alternate, requestRender);
+        });
+        return;
+      } catch { /* custom unsupported/failed → editor fallback */ }
+    }
+    if (typeof ctx.ui.editor === "function") {
+      try { await ctx.ui.editor(title, text); return; } catch { /* notify fallback */ }
+    }
+    ctx.ui.notify(text.slice(0, 1500) + (text.length > 1500 ? "\n…(截断，无法打开预览窗口)" : ""), "info");
+  }
+
+  /** Fetch + render the statement for one id/prefix; null when unresolvable. */
+  async function fetchStatement(
+    ctx: ExtensionContext,
+    tokens: string[],
+  ): Promise<{ title: string; text: string; status: string } | null> {
+    const r = await execMathx(["mathx.harvest", "show", ...tokens]);
+    if (!r.ok) {
+      ctx.ui.notify(`show 失败: ${r.text.trim().slice(0, 300)}`, "error");
+      return null;
+    }
+    let out: ShowOutput;
+    try {
+      out = JSON.parse(r.text) as ShowOutput;
+    } catch {
+      return null;
+    }
+    const p = out.problems?.[0];
+    if (!p) return null;
+    const e = p.entry;
+    const body = String(p.statement ?? "(no statement file)").replace(/^---[\s\S]*?---\s*/, "").trim();
+    return {
+      title: `${e.id}  [${e.status}|t${e.tractability}]`,
+      text: `${e.title}\n${e.id} · ${e.status} · tractability=${e.tractability}\n\n${body}`,
+      status: e.status,
+    };
+  }
+
+  /** Fetch + render the solution for one id/prefix; null when unresolvable. */
+  async function fetchSolution(
+    ctx: ExtensionContext,
+    tokens: string[],
+  ): Promise<{ title: string; text: string } | null> {
+    const r = await execMathx(["mathx.harvest", "solution", ...tokens]);
+    if (!r.ok) {
+      ctx.ui.notify(`solution 失败: ${r.text.trim().slice(0, 300)}`, "error");
+      return null;
+    }
+    let out: SolutionOutput;
+    try {
+      out = JSON.parse(r.text) as SolutionOutput;
+    } catch {
+      ctx.ui.notify(r.text.trim().slice(0, 500) || "(empty solution output)", "info");
+      return null;
+    }
+    if (out.ambiguous) {
+      const lines = (out.matches ?? []).map((m) => `  ${m.id} — ${m.title}`);
+      ctx.ui.notify(`前缀不唯一，匹配 ${lines.length} 个:\n${lines.join("\n")}`, "warning");
+      return null;
+    }
+    const p = out.problems?.[0];
+    if (!p) {
+      ctx.ui.notify("没有匹配的问题", "warning");
+      return null;
+    }
+    const v = p.verification?.verdict;
+    return { title: `题解 ${p.entry.id}${v ? ` [${v}]` : ""}`, text: renderSolutionText(p) };
+  }
+
+  /** Fetch + display the solution for one id/prefix; viewer in UI, truncated notify headless. */
+  async function previewSolution(ctx: ExtensionContext, tokens: string[]): Promise<void> {
+    const sol = await fetchSolution(ctx, tokens);
+    if (!sol) return;
+    if (ctx.hasUI) {
+      const st = await fetchStatement(ctx, tokens);
+      await previewText(ctx, sol.title, sol.text, st ? { title: st.title, text: st.text } : null);
+    } else {
+      ctx.ui.notify(
+        sol.text.slice(0, 1500) + (sol.text.length > 1500 ? "\n…(截断，请在 UI 中用 /solution 查看全文)" : ""),
+        "info",
+      );
+    }
   }
 
   /**
@@ -459,6 +740,7 @@ export default function mathxAutorun(pi: ExtensionApi) {
   async function interactiveMenu(
     ctx: ExtensionContext,
     preset?: { status?: string; field?: string },
+    view: "statement" | "solution" = "statement",
   ): Promise<void> {
     // Guard: older omp builds may lack select/editor — fall back to the legacy notify path.
     if (typeof ctx.ui.select !== "function" || typeof ctx.ui.editor !== "function") {
@@ -474,7 +756,7 @@ export default function mathxAutorun(pi: ExtensionApi) {
       const filtered = entries.filter(
         (e) => (statusF === "全部" || e.status === statusF) && (fieldF === "全部" || e.field === fieldF),
       );
-      const title = `查看问题 · ${statusF} · ${fieldF} · ${filtered.length}/${entries.length} 题`;
+      const title = `${view === "solution" ? "查看题解" : "查看问题"} · ${statusF} · ${fieldF} · ${filtered.length}/${entries.length} 题`;
       const items: { label: string; description?: string }[] = [
         { label: STATUS_LABEL, description: `当前：${statusF}` },
         { label: FIELD_LABEL, description: `当前：${fieldF}` },
@@ -498,43 +780,39 @@ export default function mathxAutorun(pi: ExtensionApi) {
         continue;
       }
       // picked is a problem id → preview the full statement, then return to the menu.
-      const r = await execMathx(["mathx.harvest", "show", picked]);
-      if (!r.ok) {
-        ctx.ui.notify(`show 失败: ${r.text.trim().slice(0, 300)}`, "error");
+      if (view === "solution") {
+        await previewSolution(ctx, [picked]);
         continue;
       }
-      let out: ShowOutput;
-      try {
-        out = JSON.parse(r.text) as ShowOutput;
-      } catch {
-        continue;
+      const st = await fetchStatement(ctx, [picked]);
+      if (!st) continue;
+      let solAlt: { title: string; text: string } | null = null;
+      if (st.status === "solved") {
+        solAlt = await fetchSolution(ctx, [picked]);
       }
-      const p = out.problems?.[0];
-      if (!p) continue;
-      const e = p.entry;
-      const body = String(p.statement ?? "(no statement file)").replace(/^---[\s\S]*?---\s*/, "").trim();
-      const text = `${e.title}\n${e.id} · ${e.status} · tractability=${e.tractability}\n\n${body}`;
-      await ctx.ui.editor(`${e.id}  [${e.status}|t${e.tractability}]（Enter/Esc 关闭，不回写）`, text);
+      await previewText(ctx, st.title, st.text, solAlt);
       // loop continues → menu reappears with filters intact
     }
   }
 
+  function showCompletions(prefix: string) {
+    const { entries, fields } = loadShowRegistry();
+    const p = (prefix || "").toLowerCase();
+    const items: { value: string; label: string; description?: string }[] = [];
+    for (const f of fields) {
+      if (f.toLowerCase().startsWith(p)) items.push({ value: `${f}/`, label: `${f}/`, description: "kind" });
+    }
+    for (const e of entries) {
+      if (e.id.toLowerCase().includes(p) || e.title.toLowerCase().includes(p)) {
+        items.push({ value: e.id, label: e.id, description: `[${e.status}|t${e.tractability}] ${e.title}` });
+      }
+    }
+    return items.slice(0, 50);
+  }
+
   pi.registerCommand("show", {
     description: "查看已记录问题：/show <id前缀> 直接看题；/show 交互菜单浏览过滤",
-    getArgumentCompletions: (prefix: string) => {
-      const { entries, fields } = loadShowRegistry();
-      const p = (prefix || "").toLowerCase();
-      const items: { value: string; label: string; description?: string }[] = [];
-      for (const f of fields) {
-        if (f.toLowerCase().startsWith(p)) items.push({ value: `${f}/`, label: `${f}/`, description: "kind" });
-      }
-      for (const e of entries) {
-        if (e.id.toLowerCase().includes(p) || e.title.toLowerCase().includes(p)) {
-          items.push({ value: e.id, label: e.id, description: `[${e.status}|t${e.tractability}] ${e.title}` });
-        }
-      }
-      return items.slice(0, 50);
-    },
+    getArgumentCompletions: showCompletions,
     handler: async (args: string, ctx: ExtensionContext) => {
       const tokens = (args || "").trim().split(/\s+/).filter(Boolean);
 
@@ -577,6 +855,60 @@ export default function mathxAutorun(pi: ExtensionApi) {
 
       // everything else: id-prefix direct lookup, legacy rendering preserved
       await renderShowResults(ctx, tokens);
+    },
+  });
+
+  pi.registerCommand("solution", {
+    description: "查看题解：/solution <id前缀> 直接看（裁决摘要+证明全文）；/solution 交互菜单（默认只列 solved）",
+    getArgumentCompletions: showCompletions,
+    handler: async (args: string, ctx: ExtensionContext) => {
+      const tokens = (args || "").trim().split(/\s+/).filter(Boolean);
+
+      // no arguments → interactive menu (default solved filter; changeable in-menu);
+      // headless → list solved ids
+      if (tokens.length === 0) {
+        if (!ctx.hasUI) {
+          const { entries } = loadShowRegistry();
+          const solved = entries.filter((e) => e.status === "solved");
+          const lines = solved.slice(0, 10).map((e) => `  ${e.id} — ${e.title}`);
+          ctx.ui.notify(
+            solved.length
+              ? `已解决 ${solved.length} 题（最多列 10 个）:\n${lines.join("\n")}\n用 /solution <id前缀> 查看题解`
+              : "尚无 solved 问题",
+            "info",
+          );
+          return;
+        }
+        await interactiveMenu(ctx, { status: "solved" }, "solution");
+        return;
+      }
+
+      if (tokens.some((t) => t.startsWith("--"))) {
+        if (ctx.hasUI) {
+          ctx.ui.notify("过滤参数已移至交互菜单：直接 /solution 后选择状态/领域过滤", "info");
+          await interactiveMenu(ctx, { status: "solved" }, "solution");
+        } else {
+          ctx.ui.notify("用法：/solution <id前缀> 直接看题解；/solution 交互浏览（过滤在菜单中）", "warning");
+        }
+        return;
+      }
+
+      if (tokens.length === 1) {
+        const t = tokens[0];
+        const { fields } = loadShowRegistry();
+        if (SHOW_STATUSES.includes(t)) {
+          if (ctx.hasUI) await interactiveMenu(ctx, { status: t }, "solution");
+          else ctx.ui.notify("过滤已移至 /solution 交互菜单", "info");
+          return;
+        }
+        if (fields.includes(t)) {
+          if (ctx.hasUI) await interactiveMenu(ctx, { status: "solved", field: t }, "solution");
+          else ctx.ui.notify("过滤已移至 /solution 交互菜单", "info");
+          return;
+        }
+      }
+
+      await previewSolution(ctx, tokens);
     },
   });
 

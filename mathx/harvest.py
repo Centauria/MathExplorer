@@ -15,6 +15,7 @@ CLI:
     uv run python -m mathx.harvest next-field
     uv run python -m mathx.harvest list [--status s] [--field f]
     uv run python -m mathx.harvest show [problem_id] [--status s] [--field f]
+    uv run python -m mathx.harvest solution [problem_id]
     uv run python -m mathx.harvest set-status <problem_id> <status>
     uv run python -m mathx.harvest mark-hunted <field>
 """
@@ -41,6 +42,7 @@ FIELDS_PATH = DATA_DIR / "fields.txt"
 INBOX_DIR = DATA_DIR / "inbox"
 SEEDS_DIR = DATA_DIR / "seeds"
 PROBLEMS_DIR = DATA_DIR / "problems"
+RESULTS_DIR = REPO_ROOT / "results"
 
 DEFAULT_FIELDS = [
     "number-theory",
@@ -403,16 +405,13 @@ def list_problems(status: str | None = None, field: str | None = None) -> list[d
     return out
 
 
-def show_problems(
+def _resolve_entries(
     problem_id: str | None = None, status: str | None = None, field: str | None = None
-) -> dict:
-    """Registry entries plus full statement text from data/problems/<id>.md.
+) -> list[dict] | dict:
+    """Shared bare-token resolution for show/solution.
 
-    Bare-token resolution order: exact id > status name (queued/exploring/...)
-    > field name > unique prefix on the id or its slug part. Ambiguous prefix ->
-    {"ambiguous": true, "matches": [...]}. Status/field tokens act as filters
-    on top of any --status/--field flags. Without a token, every entry passing
-    the filters is shown.
+    Returns the resolved entry list, or {"ambiguous": True, "matches": [...]}
+    when a prefix matches multiple entries. Raises KeyError on no match.
     """
     entries = list_problems(status=status, field=field)
     if problem_id:
@@ -437,8 +436,25 @@ def show_problems(
                     "matches": [{"id": e["id"], "title": e["title"]} for e in matches],
                 }
             entries = matches
+    return entries
+
+
+def show_problems(
+    problem_id: str | None = None, status: str | None = None, field: str | None = None
+) -> dict:
+    """Registry entries plus full statement text from data/problems/<id>.md.
+
+    Bare-token resolution order: exact id > status name (queued/exploring/...)
+    > field name > unique prefix on the id or its slug part. Ambiguous prefix ->
+    {"ambiguous": true, "matches": [...]}. Status/field tokens act as filters
+    on top of any --status/--field flags. Without a token, every entry passing
+    the filters is shown.
+    """
+    resolved = _resolve_entries(problem_id, status, field)
+    if isinstance(resolved, dict):
+        return resolved
     out = []
-    for e in entries:
+    for e in resolved:
         path = PROBLEMS_DIR / f"{e['id']}.md"
         statement = path.read_text(encoding="utf-8") if path.exists() else None
         out.append(
@@ -446,6 +462,44 @@ def show_problems(
                 "entry": e,
                 "statement_file": str(path.relative_to(REPO_ROOT)),
                 "statement": statement,
+            }
+        )
+    return {"count": len(out), "problems": out}
+
+
+def _read_json(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def show_solutions(problem_id: str | None = None) -> dict:
+    """Solution artifacts (blueprint + verification + run state) from results/<id>/.
+
+    Same bare-token resolution as show_problems. Without a token, defaults to
+    status="solved" — a solution listing is only meaningful for solved problems;
+    pass a token to look up a draft for an exploring/stalled problem.
+    """
+    resolved = _resolve_entries(problem_id, None if problem_id else "solved", None)
+    if isinstance(resolved, dict):
+        return resolved
+    out = []
+    for e in resolved:
+        rdir = RESULTS_DIR / e["id"]
+        verified_path = rdir / "blueprint_verified.md"
+        draft_path = rdir / "blueprint.md"
+        verification_path = rdir / "verification.json"
+        out.append(
+            {
+                "entry": e,
+                "verified_file": str(verified_path.relative_to(REPO_ROOT)),
+                "verified": verified_path.read_text(encoding="utf-8") if verified_path.exists() else None,
+                "draft_file": str(draft_path.relative_to(REPO_ROOT)),
+                "draft": draft_path.read_text(encoding="utf-8") if draft_path.exists() else None,
+                "verification_file": str(verification_path.relative_to(REPO_ROOT)),
+                "verification": _read_json(verification_path),
+                "run": _read_json(rdir / "run.json"),
             }
         )
     return {"count": len(out), "problems": out}
@@ -476,6 +530,8 @@ def main(argv: list[str] | None = None) -> int:
     p_show.add_argument("problem_id", nargs="?")
     p_show.add_argument("--status")
     p_show.add_argument("--field")
+    p_sol = sub.add_parser("solution", help="show solution artifacts (blueprint + verification) for problem(s)")
+    p_sol.add_argument("problem_id", nargs="?")
     p_set = sub.add_parser("set-status")
     p_set.add_argument("problem_id")
     p_set.add_argument("status")
@@ -492,6 +548,8 @@ def main(argv: list[str] | None = None) -> int:
             _print(list_problems(status=args.status, field=args.field))
         elif args.cmd == "show":
             _print(show_problems(problem_id=args.problem_id, status=args.status, field=args.field))
+        elif args.cmd == "solution":
+            _print(show_solutions(problem_id=args.problem_id))
         elif args.cmd == "set-status":
             _print(set_status(args.problem_id, args.status, force=args.force))
         elif args.cmd == "mark-hunted":

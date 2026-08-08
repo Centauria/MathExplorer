@@ -2,7 +2,7 @@
 
 State file: results/<problem_id>/run.json
     {"problem_id", "status": "running|solved|unsolvable|postponed", "iteration": 0,
-     "max_iterations": 10, "phase": "search",
+     "max_iterations": 3, "phase": "search",
      "history": [{"iteration", "phase", "note", "utc"}]}
 
 Phase semantics (mirror run_example.sh's odd/even alternation; iteration 0 = search):
@@ -10,7 +10,7 @@ Phase semantics (mirror run_example.sh's odd/even alternation; iteration 0 = sea
 - "deepthink": no retrieval — memory + reasoning + fleet sub-agents only.
 
 CLI:
-    uv run python -m mathx.runstate init <problem_id> [--max-iterations 10]
+    uv run python -m mathx.runstate init <problem_id> [--max-iterations 3]
     uv run python -m mathx.runstate advance <problem_id> [--note "..."]
     uv run python -m mathx.runstate status <problem_id>
     uv run python -m mathx.runstate stop <problem_id> <solved|unsolvable|postponed> [--verdict true|false]
@@ -61,7 +61,7 @@ def _save(state: dict) -> None:
     os.replace(tmp, path)
 
 
-def runstate_init(problem_id: str, max_iterations: int = 10) -> dict:
+def runstate_init(problem_id: str, max_iterations: int = 3) -> dict:
     path = _state_path(problem_id)
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8"))  # no-op resume semantics
@@ -118,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p_init = sub.add_parser("init")
     p_init.add_argument("problem_id")
-    p_init.add_argument("--max-iterations", type=int, default=10)
+    p_init.add_argument("--max-iterations", type=int, default=3)
     p_adv = sub.add_parser("advance")
     p_adv.add_argument("problem_id")
     p_adv.add_argument("--note", default="")

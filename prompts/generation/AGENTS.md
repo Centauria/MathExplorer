@@ -113,7 +113,7 @@ Use append-only channels (except `meta.json`):
 
 ## Iteration Protocol
 
-- Before starting: `uv run python -m mathx.runstate init <problem_id> [--max-iterations 10]`
+- Before starting: `uv run python -m mathx.runstate init <problem_id> [--max-iterations 3]`
 - At the end of every iteration: `uv run python -m mathx.runstate advance <problem_id> --note "<one-line summary>"` and OBEY the phase in the returned state:
   - `phase == "search"`: you may use web_search / leansearch.
   - `phase == "deepthink"`: NO retrieval of any kind — memory + reasoning + fleet sub-agents only.

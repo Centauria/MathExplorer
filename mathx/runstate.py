@@ -1,7 +1,7 @@
 """runstate.py — iteration state machine for the solver loop (replaces run_example.sh resume logic).
 
 State file: results/<problem_id>/run.json
-    {"problem_id", "status": "running|solved|stalled", "iteration": 0,
+    {"problem_id", "status": "running|solved|unsolvable|postponed", "iteration": 0,
      "max_iterations": 10, "phase": "search",
      "history": [{"iteration", "phase", "note", "utc"}]}
 
@@ -13,7 +13,7 @@ CLI:
     uv run python -m mathx.runstate init <problem_id> [--max-iterations 10]
     uv run python -m mathx.runstate advance <problem_id> [--note "..."]
     uv run python -m mathx.runstate status <problem_id>
-    uv run python -m mathx.runstate stop <problem_id> <solved|stalled>
+    uv run python -m mathx.runstate stop <problem_id> <solved|unsolvable|postponed> [--verdict true|false]
 """
 
 from __future__ import annotations
@@ -90,11 +90,15 @@ def runstate_advance(problem_id: str, note: str = "") -> dict:
     return state
 
 
-def runstate_stop(problem_id: str, outcome: str) -> dict:
-    if outcome not in ("solved", "stalled"):
-        raise ValueError("outcome must be 'solved' or 'stalled'")
+def runstate_stop(problem_id: str, outcome: str, verdict: str | None = None) -> dict:
+    if outcome not in ("solved", "unsolvable", "postponed"):
+        raise ValueError("outcome must be 'solved', 'unsolvable' or 'postponed'")
+    if verdict is not None and verdict not in ("true", "false"):
+        raise ValueError("verdict must be 'true' or 'false'")
     state = _load(problem_id)
     state["status"] = outcome
+    if verdict is not None:
+        state["verdict"] = verdict
     state["history"].append(
         {"iteration": state["iteration"], "phase": state["phase"], "note": f"stopped: {outcome}", "utc": _utc_now()}
     )
@@ -122,7 +126,8 @@ def main(argv: list[str] | None = None) -> int:
     p_status.add_argument("problem_id")
     p_stop = sub.add_parser("stop")
     p_stop.add_argument("problem_id")
-    p_stop.add_argument("outcome", choices=["solved", "stalled"])
+    p_stop.add_argument("outcome", choices=["solved", "unsolvable", "postponed"])
+    p_stop.add_argument("--verdict", choices=["true", "false"], help="mathematical outcome (solved only)")
     args = ap.parse_args(argv)
     try:
         if args.cmd == "init":
@@ -132,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.cmd == "status":
             state = _load(args.problem_id)
         elif args.cmd == "stop":
-            state = runstate_stop(args.problem_id, args.outcome)
+            state = runstate_stop(args.problem_id, args.outcome, verdict=args.verdict)
         print(json.dumps(state, ensure_ascii=False, indent=2))
         return 0
     except (ValueError, FileNotFoundError, json.JSONDecodeError) as e:

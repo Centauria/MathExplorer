@@ -8,14 +8,14 @@ Rewrite the statement into a self-contained form: define every non-standard term
 ## Step 2 — Literature check
 - Run `uv run python -m mathx.leansearch "<restatement>" --num 5`.
 - Run one web search: `<key phrase> theorem|conjecture|counterexample`.
-- If it is a known result (proved or refuted): report to the user with the exact reference (name, arXiv id / source), then file it (Step 4) with status `solved` (known true) or `falsified` (known false) and stop. Do not dispatch the solver.
+- If it is a known result (proved or refuted): **report to the user with the exact reference (name, arXiv id / source) and do NOT file it into the problem registry** — the problem library only holds problems we work on. Stop. Do not dispatch the solver.
 - If it is a known OPEN problem: tell the user, then continue to Step 4 and dispatch like any queued problem.
 
 ## Step 3 — Cheap computation / small cases
 When the statement is checkable for small cases (number theory, combinatorics, finite structures):
 - Use the Wolfram MCP tools or node_repl to test the smallest instances (n = 1..10 or the smallest meaningful sizes).
 - Actively hunt for a counterexample; try edge cases (n=0, n=1, empty/degenerate objects) first.
-- Counterexample found → report it to the user, file with status `falsified` (attach the counterexample), stop.
+- Counterexample found → report it to the user, then file it with status `solved` and `--verdict false`（反例即严格证伪，属于"已解决"）: write `data/seeds/<slug>.md` (Step 4) with the counterexample recorded in `## Triage`, then `uv run python -m mathx.harvest set-status <id> solved --verdict false --reason "<反例>"`. Stop.
 - All small cases pass → record the evidence; it raises confidence but proves nothing.
 
 ## Step 4 — File and route

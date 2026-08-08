@@ -87,7 +87,7 @@ When — and only when — a full proof of the whole problem has been assembled 
    Each referee reads `prompts/verification/VERIFIER.md`, the statement, and the blueprint; checks external citations live (web_search + leansearch); and writes `results/<problem_id>/referee/v{1,2,3}.json`.
 2. Aggregate deterministically: `uv run python -m mathx.aggregate <problem_id>` — the unanimous rule (all parseable-and-correct, zero critical_errors, zero gaps) lives in this code, not in anyone's judgment. It writes `results/<problem_id>/verification.json`.
 3. Persist the aggregate result into the `verification_reports` memory channel verbatim.
-4. Pass → rename `blueprint.md` to `blueprint_verified.md`, then `uv run python -m mathx.runstate stop <problem_id> solved`.
+4. Pass → rename `blueprint.md` to `blueprint_verified.md`, then `uv run python -m mathx.runstate stop <problem_id> solved --verdict true|false` (true = 证明成立；false = 证伪/反例；independence 证明 → `stop <problem_id> unsolvable` 并注明形式系统)。
 5. Fail → persist the repair_hints into `failed_paths`, repair the proof, and re-verify only after a genuinely complete revised proof exists.
 
 ## Required Memory Policy
@@ -117,8 +117,8 @@ Use append-only channels (except `meta.json`):
 - At the end of every iteration: `uv run python -m mathx.runstate advance <problem_id> --note "<one-line summary>"` and OBEY the phase in the returned state:
   - `phase == "search"`: you may use web_search / leansearch.
   - `phase == "deepthink"`: NO retrieval of any kind — memory + reasoning + fleet sub-agents only.
-- Verification passed → rename `blueprint.md` to `blueprint_verified.md`, then `uv run python -m mathx.runstate stop <problem_id> solved`.
-- `iteration >= max_iterations` → `uv run python -m mathx.runstate stop <problem_id> stalled` (keep memory and the blueprint draft for a later revival).
+- Verification passed → rename `blueprint.md` to `blueprint_verified.md`, then `uv run python -m mathx.runstate stop <problem_id> solved --verdict true|false` (true = 证明成立；false = 证伪/反例。independence/unprovability 证明 → `stop <problem_id> unsolvable`，并写明相对的形式系统)。
+- `iteration >= max_iterations` → `uv run python -m mathx.runstate stop <problem_id> postponed`（自动暂停；keep memory and the blueprint draft for a later revival）。调度员随后会把 registry 状态同步为 postponed，不再自动重派；用户 `/solve` 或「继续 <problem_id>」时按 revival 续攻。
 - On revival (a "continue" message), read `results/<problem_id>/run.json` and resume at its iteration/phase. Never restart from zero unless told to.
 
 ## Adaptive Control Loop

@@ -3,8 +3,8 @@ description: 求解一个 open problem（/solve [problem_id]）
 ---
 求解 open problem。参数：$ARGUMENTS。
 - 参数为空：运行 `uv run python -m mathx.harvest list --status queued`，选 tractability 最小者。
-- 否则 problem_id 取第一个参数。
-- 分派前先 `uv run python -m mathx.harvest set-status <problem_id> exploring`。
+- 否则 problem_id 取第一个参数。若该题状态为 postponed：这是**恢复续攻**（resume）——分派前先读 `results/<problem_id>/run.json`，solver 需从上次迭代/phase 续攻（revival 语义）。
+- 分派前先 `uv run python -m mathx.harvest set-status <problem_id> tackling`。
   - 若此命令报 "chain gate closed"（data/CHAIN_ON 不存在）：自动推进被代码闸拦截，**停手**，只汇报现状（用户明确指令时可用 `--force` 绕过，但那是用户命令，不是自动推进）。
 
 用 task 工具后台派出。**task 调用必须包含 `"agent": "solver"` 字段**——照此骨架构造，逐项填变量，不得省略 agent：

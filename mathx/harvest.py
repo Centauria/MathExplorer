@@ -16,7 +16,8 @@ CLI:
     uv run python -m mathx.harvest list [--status s] [--field f]
     uv run python -m mathx.harvest show [problem_id] [--status s] [--field f]
     uv run python -m mathx.harvest solution [problem_id]
-    uv run python -m mathx.harvest set-status <problem_id> <status>
+    uv run python -m mathx.harvest current
+    uv run python -m mathx.harvest set-status <problem_id> <status> [--reason ...] [--verdict true|false] [--force]
     uv run python -m mathx.harvest mark-hunted <field>
 """
 
@@ -58,7 +59,7 @@ DEFAULT_FIELDS = [
 ]
 
 ORIGINS = {"classic", "arxiv", "ai-generated", "user", "control"}
-STATUSES = {"queued", "exploring", "solved", "falsified", "stalled"}
+STATUSES = {"queued", "tackling", "postponed", "solved", "unsolvable"}
 
 DEDUP_SYSTEM = (
     "You decide whether a candidate mathematics problem duplicates any problem already in a registry. "
@@ -368,11 +369,13 @@ def ingest() -> dict:
 
 # ---------------------------------------------------------------- status
 
-def set_status(problem_id: str, status: str, force: bool = False) -> dict:
+def set_status(
+    problem_id: str, status: str, force: bool = False, reason: str | None = None, verdict: str | None = None
+) -> dict:
     if status not in STATUSES:
         raise ValueError(f"invalid status {status!r}; allowed: {sorted(STATUSES)}")
-    if status == "exploring" and not force:
-        # Hard chain gate: automatic dispatch (the only caller of exploring)
+    if status == "tackling" and not force:
+        # Hard chain gate: automatic dispatch (the only caller of tackling)
         # is blocked unless data/CHAIN_ON exists. User-commanded dispatch
         # passes --force. This is enforced in code, not in prose, because the
         # dispatcher's own discipline is the failure mode this guards against.
@@ -381,16 +384,47 @@ def set_status(problem_id: str, status: str, force: bool = False) -> dict:
                 "chain gate closed: data/CHAIN_ON absent. Automatic dispatch is blocked. "
                 "Run /chain on to open the gate, or pass --force for a user-commanded dispatch."
             )
+    if verdict is not None and verdict not in ("true", "false"):
+        raise ValueError("verdict must be 'true' or 'false'")
     reg = load_registry()
     for entry in reg["problems"]:
         if entry["id"] == problem_id:
-            if status == "exploring" and entry["status"] != "exploring":
+            if status == "tackling" and entry["status"] != "tackling":
                 entry["attempts"] = int(entry.get("attempts", 0)) + 1
             entry["status"] = status
+            if reason:
+                entry["reason"] = reason
+            if verdict is not None:
+                entry["verdict"] = verdict
             entry["last_activity_utc"] = _utc_now()
             save_registry(reg)
             return entry
     raise KeyError(f"problem not found: {problem_id}")
+
+
+def current_state() -> dict:
+    """Active (tackling) + postponed problems with run summaries, plus queue counts."""
+    reg = load_registry()
+    counts: dict[str, int] = {}
+    active = []
+    for entry in reg["problems"]:
+        st = entry["status"]
+        counts[st] = counts.get(st, 0) + 1
+        if st in ("tackling", "postponed"):
+            active.append(
+                {
+                    "id": entry["id"],
+                    "title": entry["title"],
+                    "status": st,
+                    "tractability": entry.get("tractability"),
+                    "attempts": entry.get("attempts", 0),
+                    "reason": entry.get("reason"),
+                    "last_activity_utc": entry.get("last_activity_utc"),
+                    "run": _read_json(RESULTS_DIR / entry["id"] / "run.json"),
+                }
+            )
+    active.sort(key=lambda a: (a["status"] != "tackling", a["last_activity_utc"] or ""))
+    return {"counts": counts, "active": active}
 
 
 def list_problems(status: str | None = None, field: str | None = None) -> list[dict]:
@@ -479,7 +513,7 @@ def show_solutions(problem_id: str | None = None) -> dict:
 
     Same bare-token resolution as show_problems. Without a token, defaults to
     status="solved" — a solution listing is only meaningful for solved problems;
-    pass a token to look up a draft for an exploring/stalled problem.
+    pass a token to look up a draft for a tackling/postponed problem.
     """
     resolved = _resolve_entries(problem_id, None if problem_id else "solved", None)
     if isinstance(resolved, dict):
@@ -532,9 +566,12 @@ def main(argv: list[str] | None = None) -> int:
     p_show.add_argument("--field")
     p_sol = sub.add_parser("solution", help="show solution artifacts (blueprint + verification) for problem(s)")
     p_sol.add_argument("problem_id", nargs="?")
+    sub.add_parser("current", help="show active (tackling) + postponed problems and queue counts")
     p_set = sub.add_parser("set-status")
     p_set.add_argument("problem_id")
     p_set.add_argument("status")
+    p_set.add_argument("--reason", help="transition note (stored on the entry, shown by /current)")
+    p_set.add_argument("--verdict", choices=["true", "false"], help="mathematical outcome for solved entries")
     p_set.add_argument("--force", action="store_true", help="bypass the chain gate (user-commanded dispatch)")
     p_mark = sub.add_parser("mark-hunted")
     p_mark.add_argument("field")
@@ -550,8 +587,10 @@ def main(argv: list[str] | None = None) -> int:
             _print(show_problems(problem_id=args.problem_id, status=args.status, field=args.field))
         elif args.cmd == "solution":
             _print(show_solutions(problem_id=args.problem_id))
+        elif args.cmd == "current":
+            _print(current_state())
         elif args.cmd == "set-status":
-            _print(set_status(args.problem_id, args.status, force=args.force))
+            _print(set_status(args.problem_id, args.status, force=args.force, reason=args.reason, verdict=args.verdict))
         elif args.cmd == "mark-hunted":
             _print(mark_field_hunted(args.field))
         return 0

@@ -24,9 +24,9 @@ const CONTINUE_PROMPT =
   "检查 MathExplorer 循环：读 data/registry.json 与 results/ 下各 run.json；按项目根 AGENTS.md 的调度纪律推进（复活/分派/补货），全部产物落盘。";
 
 const CHEATSHEET_LINES = [
-  "MathExplorer: /mx 速查表 · /ask <命题> 猜想分诊 · /solve [id] 攻关 · /hunt [field] [quota] 补货 · /brief 简报 · /show <id前缀> 看题 · /solution <id前缀> 看题解 · 菜单浏览过滤",
+  "MathExplorer: /mx 速查表 · /ask <命题> 猜想分诊 · /solve <id前缀> 开始/恢复攻关 · /postpone <id> [原因] 暂停 · /current 活跃概况 · /hunt [field] [quota] 补货 · /brief 简报 · /show <id前缀> 看题 · /solution <id前缀> 看题解 · 菜单浏览过滤",
   "/stop 紧急制动 · /autorun on|off|status 无人值守 · /chain on|off 链式推进 · data/seeds/ 丢.md录入 · data/STOP=总闸",
-  "内置: /model 切模型 · /pause 暂停 · /collab 远程介入 · /reload-plugins 刷新命令 · Esc 中断当前轮",
+  "内置: /model 切模型 · /collab 远程介入 · /reload-plugins 刷新命令 · Esc 中断当前轮",
 ];
 
 // ---- minimal omp extension API types (local mirror of the documented surface) ----
@@ -390,13 +390,15 @@ export default function mathxAutorun(pi: ExtensionApi) {
   });
 
   // ---- /show: inspect recorded problems; interactive menu + direct id lookup ----
-  const SHOW_STATUSES = ["queued", "exploring", "solved", "falsified", "stalled"];
+  const SHOW_STATUSES = ["queued", "tackling", "postponed", "solved", "unsolvable"];
   interface RegistryEntryLite {
     id: string;
     title: string;
     status: string;
     tractability: number;
     field: string;
+    verdict?: string;
+    reason?: string;
   }
   let showRegistryCache: { at: number; entries: RegistryEntryLite[]; fields: string[] } | null = null;
 
@@ -408,6 +410,7 @@ export default function mathxAutorun(pi: ExtensionApi) {
       const reg = JSON.parse(readFileSync(join(process.cwd(), "data", "registry.json"), "utf-8"));
       entries = (reg.problems ?? []).map((p: RegistryEntryLite) => ({
         id: p.id, title: p.title, status: p.status, tractability: p.tractability, field: p.field,
+        verdict: p.verdict, reason: p.reason,
       }));
     } catch { /* registry unreadable: fields only */ }
     try {
@@ -495,6 +498,8 @@ export default function mathxAutorun(pi: ExtensionApi) {
         `=== 裁决（${p.verification_file}）===\n` +
         `verdict: ${p.verification.verdict ?? "?"} · critical_errors=${(rep.critical_errors ?? []).length} · gaps=${(rep.gaps ?? []).length}\n\n` +
         `${rep.summary ?? "(no summary)"}`;
+    } else if (e.verdict) {
+      verdictBlock = `=== 裁决 ===\nverdict: ${e.verdict}（结论在 registry，未跑过三裁判验证）${e.reason ? `\n依据: ${e.reason}` : ""}`;
     } else {
       verdictBlock = "=== 裁决 ===\n尚无 verification.json（未跑过三裁判验证）";
     }
@@ -909,6 +914,125 @@ export default function mathxAutorun(pi: ExtensionApi) {
       }
 
       await previewSolution(ctx, tokens);
+    },
+  });
+
+  /** Resolve a bare id/prefix/slug against the registry cache, mirroring
+   *  harvest's _resolve_entries: exact id > unique prefix on the id or its slug part. */
+  function resolveEntry(prefix: string): { entry: RegistryEntryLite } | { ambiguous: RegistryEntryLite[] } | null {
+    const { entries } = loadShowRegistry();
+    const exact = entries.filter((e) => e.id === prefix);
+    if (exact.length === 1) return { entry: exact[0] };
+    if (exact.length > 1) return { ambiguous: exact };
+    const matches = entries.filter(
+      (e) => e.id.startsWith(prefix) || e.id.slice(e.id.lastIndexOf("/") + 1).startsWith(prefix),
+    );
+    if (matches.length === 1) return { entry: matches[0] };
+    if (matches.length > 1) return { ambiguous: matches };
+    return null;
+  }
+
+  pi.registerCommand("solve", {
+    description: "开始/恢复攻关：/solve <id前缀>（queued=首攻；postponed=恢复续攻；分派由主 agent 执行）",
+    getArgumentCompletions: showCompletions,
+    handler: (args: string, ctx: ExtensionContext) => {
+      const tokens = (args || "").trim().split(/\s+/).filter(Boolean);
+      if (tokens.length === 0) {
+        ctx.ui.notify("用法：/solve <id前缀> 开始攻关（queued=首攻，postponed=恢复续攻）", "warning");
+        return;
+      }
+      const prefix = tokens[0];
+      const res = resolveEntry(prefix);
+      if (!res) { ctx.ui.notify(`没有匹配的问题：${prefix}`, "warning"); return; }
+      if ("ambiguous" in res) {
+        const lines = res.ambiguous.map((e) => `  ${e.id} — ${e.title}`);
+        ctx.ui.notify(`前缀不唯一，匹配 ${res.ambiguous.length} 个:\n${lines.join("\n")}`, "warning");
+        return;
+      }
+      const e = res.entry;
+      if (e.status === "tackling") { ctx.ui.notify(`已在攻关中：${e.id}`, "info"); return; }
+      if (e.status === "solved") { ctx.ui.notify(`已解决${e.verdict ? `（verdict=${e.verdict}）` : ""}，无需再解：${e.id}`, "info"); return; }
+      if (e.status === "unsolvable") { ctx.ui.notify(`已判定不可解，无需再解：${e.id}`, "info"); return; }
+      const resume = e.status === "postponed";
+      try {
+        pi.sendUserMessage(
+          `用户通过 /solve 请求开始攻关：${e.id}（前缀=${prefix}，当前状态=${e.status}${resume ? "，恢复续攻" : ""}）。` +
+          `请按 .omp/commands/solve.md 执行：先 set-status tackling（链闸关时提示用户 /chain on，用户明确指令时 --force），再派 solver（agent="solver"）。` +
+          (resume ? `该题处于 postponed，solver 需读 results/${e.id}/run.json 从上次迭代续攻（revival 语义）。` : ""),
+        );
+      } catch { /* best-effort */ }
+      ctx.ui.notify(`已请求调度${resume ? "（恢复）" : ""}：${e.id}`, "info");
+    },
+  });
+
+  pi.registerCommand("postpone", {
+    description: "手工暂停攻关：/postpone <id前缀> [原因]（状态 → postponed，不再自动调度；恢复用 /solve 或『继续 <id前缀>』）",
+    getArgumentCompletions: showCompletions,
+    handler: async (args: string, ctx: ExtensionContext) => {
+      const tokens = (args || "").trim().split(/\s+/).filter(Boolean);
+      if (tokens.length === 0) { ctx.ui.notify("用法：/postpone <id前缀> [原因]", "warning"); return; }
+      const prefix = tokens[0];
+      const reason = tokens.slice(1).join(" ") || undefined;
+      const res = resolveEntry(prefix);
+      if (!res) { ctx.ui.notify(`没有匹配的问题：${prefix}`, "warning"); return; }
+      if ("ambiguous" in res) {
+        const lines = res.ambiguous.map((e) => `  ${e.id} — ${e.title}`);
+        ctx.ui.notify(`前缀不唯一，匹配 ${res.ambiguous.length} 个:\n${lines.join("\n")}`, "warning");
+        return;
+      }
+      const e = res.entry;
+      if (e.status === "postponed") { ctx.ui.notify(`已在暂停中：${e.id}`, "info"); return; }
+      if (e.status === "solved" || e.status === "unsolvable") { ctx.ui.notify(`该题已${e.status}，无需暂停：${e.id}`, "info"); return; }
+      const r = await execMathx(["mathx.harvest", "set-status", e.id, "postponed", ...(reason ? ["--reason", reason] : [])]);
+      if (!r.ok) { ctx.ui.notify(`暂停失败: ${r.text.trim().slice(0, 300)}`, "error"); return; }
+      ctx.ui.notify(`已暂停：${e.id}${reason ? `（${reason}）` : ""}。恢复：/solve ${e.id} 或说『继续 ${e.id}』`, "info");
+    },
+  });
+
+  pi.registerCommand("current", {
+    description: "当前活跃问题：tackling 进度 + postponed 列表 + 队列概况",
+    handler: async (_args: string, ctx: ExtensionContext) => {
+      const r = await execMathx(["mathx.harvest", "current"]);
+      if (!r.ok) { ctx.ui.notify(`current 失败: ${r.text.trim().slice(0, 300)}`, "error"); return; }
+      let out: {
+        counts?: Record<string, number>;
+        active?: {
+          id: string; title: string; status: string; tractability?: number; attempts?: number;
+          reason?: string; last_activity_utc?: string;
+          run?: { status?: string; iteration?: number; max_iterations?: number; phase?: string } | null;
+        }[];
+      };
+      try {
+        out = JSON.parse(r.text);
+      } catch {
+        ctx.ui.notify(r.text.trim().slice(0, 500), "info");
+        return;
+      }
+      const counts = out.counts ?? {};
+      const active = out.active ?? [];
+      const tackling = active.filter((a) => a.status === "tackling");
+      const postponed = active.filter((a) => a.status === "postponed");
+      const lines: string[] = [];
+      if (tackling.length === 0) lines.push("当前无攻关中的问题（tackling）");
+      for (const a of tackling) {
+        const run = a.run ?? {};
+        lines.push(`▶ ${a.id} — ${a.title}`);
+        lines.push(`  attempts=${a.attempts ?? 0} · 最后活动 ${(a.last_activity_utc ?? "").slice(0, 19).replace("T", " ")}`);
+        lines.push(`  进度: iteration ${run.iteration ?? "?"}/${run.max_iterations ?? "?"} · phase=${run.phase ?? "?"} · run=${run.status ?? "?"}`);
+        lines.push("");
+      }
+      if (postponed.length > 0) {
+        lines.push(`⏸ 暂停中 ${postponed.length} 题:`);
+        for (const a of postponed.slice(0, 10)) {
+          lines.push(`  ${a.id} — ${a.reason ? `原因: ${a.reason} · ` : ""}${(a.last_activity_utc ?? "").slice(0, 19).replace("T", " ")}`);
+        }
+        lines.push("");
+      }
+      lines.push(
+        `队列: queued=${counts.queued ?? 0} · tackling=${counts.tackling ?? 0} · postponed=${counts.postponed ?? 0} · solved=${counts.solved ?? 0} · unsolvable=${counts.unsolvable ?? 0}`,
+      );
+      lines.push("恢复暂停的题：/solve <id前缀> 或说『继续 <id前缀>』");
+      ctx.ui.notify(lines.join("\n"), "info");
     },
   });
 

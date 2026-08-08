@@ -366,9 +366,19 @@ def ingest() -> dict:
 
 # ---------------------------------------------------------------- status
 
-def set_status(problem_id: str, status: str) -> dict:
+def set_status(problem_id: str, status: str, force: bool = False) -> dict:
     if status not in STATUSES:
         raise ValueError(f"invalid status {status!r}; allowed: {sorted(STATUSES)}")
+    if status == "exploring" and not force:
+        # Hard chain gate: automatic dispatch (the only caller of exploring)
+        # is blocked unless data/CHAIN_ON exists. User-commanded dispatch
+        # passes --force. This is enforced in code, not in prose, because the
+        # dispatcher's own discipline is the failure mode this guards against.
+        if not (DATA_DIR / "CHAIN_ON").exists():
+            raise ValueError(
+                "chain gate closed: data/CHAIN_ON absent. Automatic dispatch is blocked. "
+                "Run /chain on to open the gate, or pass --force for a user-commanded dispatch."
+            )
     reg = load_registry()
     for entry in reg["problems"]:
         if entry["id"] == problem_id:
@@ -469,6 +479,7 @@ def main(argv: list[str] | None = None) -> int:
     p_set = sub.add_parser("set-status")
     p_set.add_argument("problem_id")
     p_set.add_argument("status")
+    p_set.add_argument("--force", action="store_true", help="bypass the chain gate (user-commanded dispatch)")
     p_mark = sub.add_parser("mark-hunted")
     p_mark.add_argument("field")
     args = ap.parse_args(argv)
@@ -482,7 +493,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.cmd == "show":
             _print(show_problems(problem_id=args.problem_id, status=args.status, field=args.field))
         elif args.cmd == "set-status":
-            _print(set_status(args.problem_id, args.status))
+            _print(set_status(args.problem_id, args.status, force=args.force))
         elif args.cmd == "mark-hunted":
             _print(mark_field_hunted(args.field))
         return 0

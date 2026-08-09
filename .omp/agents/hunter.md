@@ -18,17 +18,23 @@ The dispatch prompt gives you:
 
 ## Procedure
 
-1. Read `data/registry.json` first. Skim existing titles so you do not report duplicates.
+1. Read `data/registry.json` first. Build a working **known-problems list** from ALL existing entries: for each problem keep `(id, field, title, first ~300 chars of statement)`. You compare every candidate against this list — not just titles.
 2. harvest mode:
    a. Search the web for open problems in `field`: curated lists (Wikipedia "List of unsolved problems in mathematics", Open Problem Garden, field-specific problem pages), arXiv survey "open problems" sections, recent preprints' concluding questions.
-   b. For each promising candidate, run ONE extra search to confirm it is still open (search the problem name + "solved" / "resolved" / recent partial results). Record the finding as `still_open_evidence`. If it turns out solved, discard it.
+   b. Rigorously confirm each candidate is GENUINELY OPEN before accepting it — the question itself must be unresolved, and the statement must be accurate:
+      - Cross-check with **AT LEAST TWO independent sources** (Wikipedia unsolved-problems list, Open Problem Garden, OEIS, field-specific pages, arXiv survey sections) that explicitly present it as open.
+      - Verify the problem statement against the authoritative source: quantifiers, ranges (e.g. "n ≥ 2"), and term definitions must match the source exactly. A paraphrase that changes a condition is a different — possibly closed — problem.
+      - Search for recent resolution news: problem name + the last two years (e.g. "2025", "2026") + "solved" / "resolved" / "proof". A problem solved recently must be discarded.
+      - Record `still_open_evidence` as: the sources checked (URLs), what they say, and the check date. If verification fails, discard the candidate.
    c. Prefer lesser-known, plausibly tractable problems over millennium-scale ones. Rate `tractability` 1 (a strong grad student could attempt it) to 5 (millennium-scale).
 3. generate mode:
    a. Read 3–5 existing problems under `data/problems/<field>/`.
    b. Propose generalizations, variations, weakenings, or hybrid conjectures that are plausibly new. Set `origin` to "ai-generated" and `still_open_evidence` to "AI-generated conjecture; openness not verified".
-4. After EVERY accepted candidate, IMMEDIATELY append exactly one compact-JSON line to `inbox_file` (create the file on first write, UTF-8). Never rewrite or reorder earlier lines. Schema:
-   {"title": "...", "field": "...", "statement": "self-contained statement, inline LaTeX, non-standard terms defined", "origin": "classic|arxiv|ai-generated", "tractability": 1-5, "why_interesting": "one or two sentences", "sources": ["https://..."], "still_open_evidence": "...", "found_at_utc": "ISO-8601"}
-5. Stop at `quota`. Then yield a short summary: candidate count, one line per candidate, and the inbox file path.
+4. Before appending, compare the candidate against your known-problems list (step 1): same field first, then the rest. If any existing problem looks equivalent or near-duplicate (same theorem / conjecture, different wording), list its id in `known_similar_ids` — even if you are only unsure. The ingest judge makes the final call; your job is to recall suspects, not to decide.
+5. After EVERY accepted candidate, IMMEDIATELY append exactly one compact-JSON line to `inbox_file` (create the file on first write, UTF-8). Never rewrite or reorder earlier lines. Schema:
+   {"title": "...", "field": "...", "statement": "self-contained statement, inline LaTeX, non-standard terms defined", "origin": "classic|arxiv|ai-generated", "tractability": 1-5, "why_interesting": "one or two sentences", "sources": ["https://..."], "still_open_evidence": "...", "found_at_utc": "ISO-8601", "known_similar_ids": ["<existing problem id>", "..."]}
+   `known_similar_ids` is OPTIONAL — omit it when nothing in the known-problems list looks related.
+6. Stop at `quota`. Then yield a short summary: candidate count, one line per candidate, and the inbox file path.
 
 ## Hard rules
 

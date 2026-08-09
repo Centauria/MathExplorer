@@ -2,10 +2,13 @@
 
 The registry (data/registry.json) is the single source of truth for the problem
 queue. Hunter agents only ever append to data/inbox/*.jsonl; ingestion happens
-here, serially, from the orchestrator. Dedup: BM25 (mathx.memory) shortlists the
-top-3 closest existing problems, then one fleet judge call decides sameness; if
-the judge call fails or is unparseable, the candidate is treated as NEW (we
-would rather keep a duplicate than lose a problem).
+here, serially, from the orchestrator. Dedup: BM25 (mathx.memory) shortlists
+top-5 closest existing problems (score > 0), plus the candidate's self-reported
+`known_similar_ids` (hunter-side suspects) and the top-2 same-field problems are
+forced into the pool; then ONE fleet judge call decides sameness. If the judge
+call fails or is unparseable, the candidate is treated as NEW (we would rather
+keep a duplicate than lose a problem). Every ingest detail reports
+`dedup_checked_against` for audit.
 
 Field rotation order is the line order of data/fields.txt — editing that file
 changes the field universe without touching code.
@@ -261,7 +264,9 @@ def _ingest_one(reg: dict, cand: dict, fields: list[str]) -> dict:
     tractability = min(max(tractability, 1), 5)
     sources = [str(s) for s in (cand.get("sources") or []) if str(s).strip()]
 
-    # BM25 shortlist over existing problems
+    # Dedup pool: BM25 top-5 (score > 0) + candidate's self-reported
+    # known_similar_ids (forced, score=0 ok) + same-field top-2 (forced,
+    # score=0 ok). ALL go to ONE judge call; entries deduped by id.
     existing = reg["problems"]
     matches: list[dict] = []
     if existing:
@@ -269,7 +274,33 @@ def _ingest_one(reg: dict, cand: dict, fields: list[str]) -> dict:
         docs = [tokenize_bm25(_existing_problem_text(e)) for e in existing]
         scores = bm25_score_documents(query_tokens_text, docs)
         ranked = sorted(zip(existing, scores), key=lambda p: -p[1])
-        matches = [{"entry": e, "score": s} for e, s in ranked[:3] if s > 0]
+
+        seen: set[str] = set()
+        picked: list[dict] = []
+
+        def _pick(entry: dict, score: float, why: str) -> None:
+            if entry["id"] in seen:
+                return
+            seen.add(entry["id"])
+            picked.append({"entry": entry, "score": score, "why": why})
+
+        for e, s in ranked[:5]:
+            if s > 0:
+                _pick(e, s, "bm25")
+        known = cand.get("known_similar_ids") or []
+        if not isinstance(known, list):
+            known = []
+        for eid in known:
+            for e in existing:
+                if e["id"] == eid:
+                    _pick(e, 0.0, "hunter")
+                    break
+        same_field_count = 0
+        for e, s in ranked:
+            if e["field"] == field and same_field_count < 2:
+                _pick(e, s, "same-field")
+                same_field_count += 1
+        matches = picked
 
     if matches:
         verdict = _dedup_judge({"title": title, "statement": statement}, matches)
@@ -282,12 +313,13 @@ def _ingest_one(reg: dict, cand: dict, fields: list[str]) -> dict:
                 "action": "merged",
                 "into": target["id"],
                 "title": title,
-                "note": "judge: duplicate of top BM25 match",
+                "dedup_checked_against": len(matches),
+                "note": f"judge: duplicate of {target['id']}",
             }
         if verdict is None:
             note = "dedup judge unavailable; treated as new"
         else:
-            note = "judge: distinct"
+            note = f"judge: distinct (checked {len(matches)})"
     else:
         note = "no similar registry problems"
 
@@ -318,7 +350,7 @@ def _ingest_one(reg: dict, cand: dict, fields: list[str]) -> dict:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_problem_file_text(entry, file_cand), encoding="utf-8")
     reg["problems"].append(entry)
-    return {"action": "added", "id": pid, "title": title, "note": note}
+    return {"action": "added", "id": pid, "title": title, "dedup_checked_against": len(matches), "note": note}
 
 
 def ingest() -> dict:

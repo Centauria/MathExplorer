@@ -99,6 +99,7 @@ interface ExtensionApi {
   appendEntry(customType: string, data: unknown): void;
   sendUserMessage(content: string): void;
   exec(command: string, args?: string[], options?: unknown): Promise<unknown>;
+  registerProvider(name: string, config: Record<string, unknown>): void;
 }
 
 interface QuotaConfig {
@@ -208,22 +209,43 @@ const SETUP_ROLES: { role: string; label: string; hint: string }[] = [
   { role: "referee_3", label: "referee_3 — 裁判 3", hint: "交叉验证，建议与其它裁判不同模型" },
 ];
 
+const MODEL_ROLE_STORAGE = "modelRoleStorage: project";
+
 /** Replace or append a modelRoles block in .omp/config.yml (line-based, machine-managed). */
 function mergeModelRoles(text: string, roles: Record<string, string>): string {
   const block = Object.entries(roles)
     .map(([k, v]) => `  ${k}: "${v.replace(/"/g, '\\"')}"`)
     .join("\n");
-  if (text.trim() === "") return `modelRoles:\n${block}\n`;
+  let out: string;
+  if (text.trim() === "") {
+    out = `modelRoles:\n${block}\n`;
+  } else {
+    const lines = text.split(/\r?\n/);
+    const idx = lines.findIndex((l) => /^modelRoles:\s*$/.test(l));
+    if (idx === -1) {
+      out = text.replace(/\s+$/, "") + `\n\nmodelRoles:\n${block}\n`;
+    } else {
+      let end = idx + 1;
+      while (end < lines.length && (lines[end].startsWith(" ") || lines[end].trim() === "")) end++;
+      const head = lines.slice(0, idx).join("\n").replace(/\s+$/, "");
+      const tail = lines.slice(end).join("\n").replace(/\s+$/, "");
+      out = `${head ? head + "\n" : ""}modelRoles:\n${block}${tail ? `\n${tail}` : ""}\n`;
+    }
+  }
+  return ensureModelRoleStorage(out);
+}
+
+/** Insert `modelRoleStorage: project` above the modelRoles block when no top-level
+ *  modelRoleStorage key exists yet. Idempotent; a user-set value is preserved.
+ *  Without it, /model writes role picks to the global config where the project's
+ *  own roles shadow them — see omp://settings.md "Where writes go". */
+function ensureModelRoleStorage(text: string): string {
+  if (/^modelRoleStorage:\s*\S/m.test(text)) return text;
   const lines = text.split(/\r?\n/);
   const idx = lines.findIndex((l) => /^modelRoles:\s*$/.test(l));
-  if (idx === -1) {
-    return text.replace(/\s+$/, "") + `\n\nmodelRoles:\n${block}\n`;
-  }
-  let end = idx + 1;
-  while (end < lines.length && (lines[end].startsWith(" ") || lines[end].trim() === "")) end++;
-  const head = lines.slice(0, idx).join("\n").replace(/\s+$/, "");
-  const tail = lines.slice(end).join("\n").replace(/\s+$/, "");
-  return `${head}\nmodelRoles:\n${block}${tail ? `\n${tail}` : ""}\n`;
+  if (idx === -1) return text;
+  lines.splice(idx, 0, MODEL_ROLE_STORAGE);
+  return lines.join("\n");
 }
 
 function needsSetup(): boolean {
@@ -268,10 +290,10 @@ async function runSetupWizard(ctx: ExtensionContext): Promise<void> {
   if (models.length === 0) {
     ctx.ui.notify(
       "未检测到任何可用模型：当前机器还没有可用的 LLM provider。\n" +
-      "请先完成 provider 配置，再重新运行 /mxsetup：\n" +
-      "  1) 编辑 ~/.omp/agent/models.yml 添加 provider，或用环境变量设置 API key；\n" +
-      "  2) 本项目常用 provider：kimi-code、SharedGLM、opencode-go、medeli、mathx（本地网关）；\n" +
-      "  3) 配置完成后重新运行 /mxsetup。",
+      "mathx 网关由扩展在加载时自动注册（runtime provider），但需网关运行才能发现模型。请：\n" +
+      "  1) 确认 config.toml 已配置 [providers] 的 keys（网关上游）；\n" +
+      "  2) 重启会话后重新运行 /mxsetup（扩展注册 + 网关启动后即可发现）；或\n" +
+      "  3) 编辑 ~/.omp/agent/models.yml 添加其它 provider，或用环境变量设置 API key。",
       "warning",
     );
     return;
@@ -361,6 +383,38 @@ export default function mathxAutorun(pi: ExtensionApi) {
   import("@oh-my-pi/pi-natives/clipboard")
     .then((m) => { nativesCopy = (m as { copyToClipboard: (t: string) => void }).copyToClipboard; })
     .catch(() => { /* not resolvable from extensions → PowerShell fallback */ });
+
+  // Register the mathx local gateway as a project-local omp provider at
+  // runtime — no global ~/.omp/agent/models.yml pollution. The gateway strips
+  // inbound auth (injects its own pool keys from config.toml), so a dummy
+  // apiKey satisfies omp's runtime-registration requirement without effect.
+  // Models are fetched synchronously from GET /v1/models at load time, with
+  // per-model api derived from supported_endpoint_types (openai→completions,
+  // anthropic→messages). If the gateway isn't running yet (cold first session),
+  // no models are registered; the gateway is launched on session_start below
+  // and models appear next session automatically.
+  try {
+    const probe = spawnSync("curl", ["-sf", "-m", "2", "http://127.0.0.1:8399/v1/models"], {
+      encoding: "utf-8",
+      timeout: 3000,
+    });
+    if (probe.status === 0 && probe.stdout) {
+      const data = JSON.parse(probe.stdout) as { data?: { id: string; supported_endpoint_types?: string[] }[] };
+      const models = (data.data || []).map((m) => {
+        const types = m.supported_endpoint_types || [];
+        const api = types.includes("anthropic") ? "anthropic-messages" : "openai-completions";
+        return { id: m.id, name: `${m.id} (mathx gw)`, api };
+      });
+      if (models.length > 0) {
+        pi.registerProvider("mathx", {
+          baseUrl: "http://127.0.0.1:8399/v1",
+          api: "openai-completions",
+          apiKey: "mathx-gateway-no-key-needed",
+          models,
+        });
+      }
+    }
+  } catch { /* gateway down or curl unavailable — mathx models won't appear this session */ }
 
   function showCheatsheet(ctx: ExtensionContext): void {
     try {

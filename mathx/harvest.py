@@ -358,25 +358,36 @@ def ingest() -> dict:
     fields = load_fields()
     candidates: list[dict] = []
     skipped = 0
+    skipped_details: list[dict] = []
 
     INBOX_DIR.mkdir(parents=True, exist_ok=True)
     for inbox in sorted(INBOX_DIR.glob("*.jsonl")):
         if inbox.name in reg["ingested_inboxes"]:
             continue
-        for line in inbox.read_text(encoding="utf-8").splitlines():
+        fully_ingested = True
+        for lineno, line in enumerate(inbox.read_text(encoding="utf-8").splitlines(), 1):
             line = line.strip()
             if not line:
                 continue
             try:
                 obj = json.loads(line)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                fully_ingested = False
                 skipped += 1
+                skipped_details.append({"inbox": inbox.name, "line": lineno, "reason": f"bad JSON: {e}"})
                 continue
             if not isinstance(obj, dict) or not str(obj.get("title", "")).strip() or not str(obj.get("statement", "")).strip():
+                fully_ingested = False
                 skipped += 1
+                skipped_details.append({"inbox": inbox.name, "line": lineno, "reason": "missing title/statement"})
                 continue
             candidates.append(obj)
-        reg["ingested_inboxes"].append(inbox.name)
+        # Only mark the inbox ingested when every line parsed cleanly; a bad
+        # line leaves it retryable (fix the file, run ingest again). Good lines
+        # of a partially-bad inbox are re-judged as duplicates on retry — the
+        # dedup judge merges them harmlessly.
+        if fully_ingested:
+            reg["ingested_inboxes"].append(inbox.name)
 
     SEEDS_DIR.mkdir(parents=True, exist_ok=True)
     for seed in sorted(SEEDS_DIR.glob("*.md")):
@@ -396,7 +407,13 @@ def ingest() -> dict:
             merged += 1
 
     save_registry(reg)
-    return {"added": added, "merged": merged, "skipped_lines": skipped, "details": details}
+    return {
+        "added": added,
+        "merged": merged,
+        "skipped_lines": skipped,
+        "skipped_details": skipped_details,
+        "details": details,
+    }
 
 
 # ---------------------------------------------------------------- status

@@ -15,6 +15,8 @@ _tmp_*.json
 data/registry.json
 data/STOP
 data/CHAIN_ON
+data/SOLVER_ON
+data/HUNTER_ON
 data/inbox/*
 !data/inbox/.gitkeep
 data/seeds/*

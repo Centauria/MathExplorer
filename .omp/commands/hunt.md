@@ -4,7 +4,7 @@ description: 派 hunter 补货 open problems（/hunt [field] [quota]）
 派 hunter agent 出去猎取 open problems。参数：$ARGUMENTS（第一个为 field，第二个为 quota）。
 - field 为空：先运行 `uv run python -m mathx.harvest next-field` 取轮转领域。
 - quota 为空：默认 1（一次一题，把每题 open 验证做透；自动续派补足轮次）。
-- **链闸检查**：hunter 分派也走 `set-status tackling`（若用 registry 题做 hunt 目标）或直接派——自动补货前确认 `data/CHAIN_ON` 存在；若 `set-status tackling` 报 "chain gate closed"，停手只汇报（用户明确指令时用 `--force`）。
+- **hunter 闸检查**：派 hunter 前必须先跑 `uv run python -m mathx.harvest gate-check hunter`——hunter 闸是白名单（`data/HUNTER_ON` 存在才允许自动补货），闸关时该命令报错并拒绝；停手只汇报（用户明确指令时用 `--force`）。
 用 task 工具派出 agent=hunter：mode=harvest，inbox_file=data/inbox/<当前UTC>_hunter.jsonl。**task 调用必须包含 `"agent": "hunter"` 字段**——照此骨架构造，不得省略 agent；`name` 用 `uv run python -m mathx.agents name hunter <field>` 生成（含模型，如 `hunter-step37Flash-combinatorics`）：
 
 ```
@@ -21,7 +21,7 @@ tasks: [{
 
 hunter 不常驻——每轮跑完 quota 就 yield，由调度员结算后决定续派。
 
-1. 触发：`data/CHAIN_ON` 存在且无 hunter 在跑（无论 solver 是否在跑，两者角色独立）——**无水位上限，持续补货**。
-2. 续派：本轮 ingest + mark-hunted 后，若闸开且无 hunter 在跑 → 立即按本文件流程派下一轮 hunter（field 用 `mathx.harvest next-field` 轮转）。
-3. 停止：`data/STOP` 存在 / 链闸关闭 / quota gate 触发（`[quota] threshold`）/ 用户叫停 → 停手只汇报。
+1. 触发：`data/HUNTER_ON` 存在且无 hunter 在跑（无论 solver 是否在跑，两者角色独立）——**无水位上限，持续补货**。
+2. 续派：本轮 ingest + mark-hunted 后，若 `gate-check hunter` 通过且无 hunter 在跑 → 立即按本文件流程派下一轮 hunter（field 用 `mathx.harvest next-field` 轮转）。
+3. 停止：`data/STOP` 存在 / hunter 闸关闭（`data/HUNTER_ON` 不存在）/ quota gate 触发（`[quota] threshold`）/ 用户叫停 → 停手只汇报。
 4. 每轮 quota 默认 1（一次一题，细验证）；quota 可在命令参数里临时调整。

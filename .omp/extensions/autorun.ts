@@ -18,14 +18,15 @@ import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
 const STATE_TYPE = "mathx.autorun.state";
-const CHAIN_STATE_TYPE = "mathx.chain.state";
+const SOLVER_STATE_TYPE = "mathx.solver.state";
+const HUNTER_STATE_TYPE = "mathx.hunter.state";
 const TICK_MS = 60_000;
 const CONTINUE_PROMPT =
   "检查 MathExplorer 循环：读 data/registry.json 与 results/ 下各 run.json；按项目根 AGENTS.md 的调度纪律推进（复活/分派/补货），全部产物落盘。";
 
 const CHEATSHEET_LINES = [
   "MathExplorer: /mx 速查表 · /ask <命题> 猜想分诊 · /solve <id前缀> 开始/恢复攻关 · /postpone <id> [原因] 暂停 · /current 活跃概况 · /hunt [field] [quota] 补货 · /brief 简报 · /show <id前缀> 看题 · /solution <id前缀> 看题解 · 菜单浏览过滤",
-  "/stop 紧急制动 · /autorun on|off|status 无人值守 · /chain on|off 链式推进 · data/seeds/ 丢.md录入 · data/STOP=总闸",
+  "/stop 紧急制动 · /autorun on|off|status 无人值守 · /solver on|off /hunter on|off 独立闸 · data/seeds/ 丢.md录入 · data/STOP=总闸",
   "内置: /model 切模型 · /collab 远程介入 · /reload-plugins 刷新命令 · Esc 中断当前轮",
 ];
 
@@ -507,7 +508,11 @@ export default function mathxAutorun(pi: ExtensionApi) {
       /* unknown snapshot: fall through cautiously */
     }
     if (existsSync(join(ctx.cwd, "data", "STOP"))) return;
-    if (!existsSync(join(ctx.cwd, "data", "CHAIN_ON"))) return; // chain gate: settle-and-report only
+    // Role gates (white-list): continue only while at least one role is open.
+    if (
+      !existsSync(join(ctx.cwd, "data", "SOLVER_ON")) &&
+      !existsSync(join(ctx.cwd, "data", "HUNTER_ON"))
+    ) return; // both gates closed: settle-and-report only
     if (!(await quotaGateOpen(ctx))) return;
     pi.sendUserMessage(CONTINUE_PROMPT);
   }
@@ -525,22 +530,26 @@ export default function mathxAutorun(pi: ExtensionApi) {
         ) {
           autorunOn = Boolean(entry.data.on);
         }
-        // Sync the chain gate file with the last persisted chain decision.
+        // Sync the role gate files with the last persisted role decisions.
         if (
           entry?.type === "custom" &&
-          entry?.customType === CHAIN_STATE_TYPE &&
+          (entry?.customType === SOLVER_STATE_TYPE || entry?.customType === HUNTER_STATE_TYPE) &&
           entry.data &&
           typeof entry.data === "object" &&
           "on" in entry.data
         ) {
-          const chainPath = join(ctx.cwd, "data", "CHAIN_ON");
+          const rolePath = join(
+            ctx.cwd,
+            "data",
+            entry.customType === SOLVER_STATE_TYPE ? "SOLVER_ON" : "HUNTER_ON",
+          );
           try {
             if (entry.data.on) {
-              if (!existsSync(chainPath)) writeFileSync(chainPath, new Date().toISOString() + "\n", "utf-8");
-            } else if (existsSync(chainPath)) {
-              unlinkSync(chainPath);
+              if (!existsSync(rolePath)) writeFileSync(rolePath, new Date().toISOString() + "\n", "utf-8");
+            } else if (existsSync(rolePath)) {
+              unlinkSync(rolePath);
             }
-          } catch { /* chain sync best-effort */ }
+          } catch { /* gate sync best-effort */ }
         }
       }
     } catch { /* state replay is best-effort */ }
@@ -1234,7 +1243,7 @@ export default function mathxAutorun(pi: ExtensionApi) {
         pi.sendUserMessage(
           `用户通过 /solve 请求开始攻关：${e.id}（前缀=${prefix}，当前状态=${e.status}${resume ? "，恢复续攻" : ""}）。` +
           `按项目派发纪律执行：` +
-          `1) 先 \`uv run python -m mathx.harvest set-status ${e.id} tackling\`；若报 "chain gate closed"（data/CHAIN_ON 不存在）且这是用户命令，用 --force 绕过。` +
+          `1) 先 \`uv run python -m mathx.harvest set-status ${e.id} tackling\`；若报 "solver gate closed"（data/SOLVER_ON 不存在）且这是用户命令，用 --force 绕过。` +
           `2) 用 \`uv run python -m mathx.agents name solver ${e.id}\` 生成 name（含所用模型，如 solver-k3-...），用 task 工具后台派出 solver，调用必须含 "agent": "solver" 字段与模型化的 "name"：{"agent": "solver", "name": "<name>", "task": "problem_id = ${e.id}. agent_name = <name>, model = <model>. Read prompts/generation/AGENTS.md and follow it exactly (memory policy, iteration protocol, stdin=DEVNULL discipline, _tmp_*.json cleanup). Resume from results/${e.id}/run.json if it exists, else runstate init + memory init."}` +
           `3) 派出后立即读 history://<spawned-id> 头部验证：agent 类型为 solver、model 符合 mathx_solver 角色；不对就 cancel 重派。验证通过后 \`uv run python -m mathx.agents stamp ${e.id} <name> <model>\` 把身份写入 run.json 的 agent 字段（归档可查模型）。` +
           (resume ? `该题处于 postponed，solver 需读 results/${e.id}/run.json 从上次迭代续攻（revival 语义）。` : ""),
@@ -1310,36 +1319,54 @@ export default function mathxAutorun(pi: ExtensionApi) {
       lines.push(
         `队列: queued=${counts.queued ?? 0} · tackling=${counts.tackling ?? 0} · postponed=${counts.postponed ?? 0} · solved=${counts.solved ?? 0} · unsolvable=${counts.unsolvable ?? 0}`,
       );
+      const gates = (out as { gates?: Record<string, boolean> }).gates ?? {};
+      lines.push(
+        `闸: STOP=${gates.STOP ? "⛔" : "开"} · solver=${gates.SOLVER_ON ? "ON" : "OFF"} · hunter=${gates.HUNTER_ON ? "ON" : "OFF"}`,
+      );
       lines.push("恢复暂停的题：/solve <id前缀> 或说『继续 <id前缀>』");
       ctx.ui.notify(lines.join("\n"), "info");
     },
   });
 
-  pi.registerCommand("chain", {
-    description: "链式推进开关：/chain on|off|status（on = 结算后自动派下一题；off = 仅汇报）",
-    handler: (args: string, ctx: ExtensionContext) => {
-      const sub = (args || "").trim() || "status";
-      const chainPath = join(ctx.cwd, "data", "CHAIN_ON");
-      if (sub === "on") {
-        try {
-          writeFileSync(chainPath, new Date().toISOString() + "\n", "utf-8");
-        } catch { /* best-effort */ }
-        pi.appendEntry(CHAIN_STATE_TYPE, { on: true });
-        ctx.ui.notify("链式推进: ON（结算后自动派下一题/复活/补货）", "info");
-        try {
-          if (ctx.isIdle()) pi.sendUserMessage(CONTINUE_PROMPT);
-        } catch { /* busy is fine */ }
-      } else if (sub === "off") {
-        try {
-          unlinkSync(chainPath);
-        } catch { /* already gone */ }
-        pi.appendEntry(CHAIN_STATE_TYPE, { on: false });
-        ctx.ui.notify("链式推进: OFF（结算照做，停止一切推进，仅汇报）", "info");
-      } else {
-        ctx.ui.notify(`链式推进: ${existsSync(chainPath) ? "ON" : "OFF"}`, "info");
-      }
+  const ROLE_GATES: Array<{
+    cmd: string; stateType: string; gateFile: string; label: string; desc: string;
+  }> = [
+    {
+      cmd: "solver", stateType: SOLVER_STATE_TYPE, gateFile: "SOLVER_ON", label: "solver",
+      desc: "solver 闸开关：/solver on|off|status（on = 允许自动派 solver；off = solver 停，仅结算汇报）",
     },
-  });
+    {
+      cmd: "hunter", stateType: HUNTER_STATE_TYPE, gateFile: "HUNTER_ON", label: "hunter",
+      desc: "hunter 闸开关：/hunter on|off|status（on = 允许自动补货；off = hunter 停）",
+    },
+  ];
+  for (const g of ROLE_GATES) {
+    pi.registerCommand(g.cmd, {
+      description: g.desc,
+      handler: (args: string, ctx: ExtensionContext) => {
+        const sub = (args || "").trim() || "status";
+        const gatePath = join(ctx.cwd, "data", g.gateFile);
+        if (sub === "on") {
+          try {
+            writeFileSync(gatePath, new Date().toISOString() + "\n", "utf-8");
+          } catch { /* best-effort */ }
+          pi.appendEntry(g.stateType, { on: true });
+          ctx.ui.notify(`${g.label} 闸: ON（自动派发已开）`, "info");
+          try {
+            if (ctx.isIdle()) pi.sendUserMessage(CONTINUE_PROMPT);
+          } catch { /* busy is fine */ }
+        } else if (sub === "off") {
+          try {
+            unlinkSync(gatePath);
+          } catch { /* already gone */ }
+          pi.appendEntry(g.stateType, { on: false });
+          ctx.ui.notify(`${g.label} 闸: OFF（该 role 停止自动派发，结算照做）`, "info");
+        } else {
+          ctx.ui.notify(`${g.label} 闸: ${existsSync(gatePath) ? "ON" : "OFF"}`, "info");
+        }
+      },
+    });
+  }
 
   pi.registerCommand("autorun", {
     description: "MathExplorer 无人值守循环：/autorun on|off|status",

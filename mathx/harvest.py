@@ -424,14 +424,14 @@ def set_status(
     if status not in STATUSES:
         raise ValueError(f"invalid status {status!r}; allowed: {sorted(STATUSES)}")
     if status == "tackling" and not force:
-        # Hard chain gate: automatic dispatch (the only caller of tackling)
-        # is blocked unless data/CHAIN_ON exists. User-commanded dispatch
-        # passes --force. This is enforced in code, not in prose, because the
+        # Hard role gate: automatic solver dispatch (the only caller of tackling)
+        # is blocked unless data/SOLVER_ON exists. User-commanded dispatch passes
+        # --force. This is enforced in code, not in prose, because the
         # dispatcher's own discipline is the failure mode this guards against.
-        if not (DATA_DIR / "CHAIN_ON").exists():
+        if not (DATA_DIR / "SOLVER_ON").exists():
             raise ValueError(
-                "chain gate closed: data/CHAIN_ON absent. Automatic dispatch is blocked. "
-                "Run /chain on to open the gate, or pass --force for a user-commanded dispatch."
+                "solver gate closed: data/SOLVER_ON absent. Automatic solver dispatch is blocked. "
+                "Run /solver on to open the gate, or pass --force for a user-commanded dispatch."
             )
     if verdict is not None and verdict not in ("true", "false"):
         raise ValueError("verdict must be 'true' or 'false'")
@@ -451,8 +451,28 @@ def set_status(
     raise KeyError(f"problem not found: {problem_id}")
 
 
+def gate_check(role: str, force: bool = False) -> dict:
+    """Check the role gate before dispatching a worker (solver|hunter).
+
+    White-list gates: automatic dispatch for a role is only allowed while
+    data/<ROLE>_ON exists. User-commanded dispatch passes --force. Enforced in
+    code because the dispatcher's own discipline is the failure mode this
+    guards against (hunter has no set-status tackling path, so its dispatch
+    MUST run this check first).
+    """
+    if role not in ("solver", "hunter"):
+        raise ValueError(f"invalid role {role!r}; allowed: solver, hunter")
+    gate = DATA_DIR / f"{role.upper()}_ON"
+    if not gate.exists() and not force:
+        raise ValueError(
+            f"{role} gate closed: data/{role.upper()}_ON absent. Automatic {role} dispatch is blocked. "
+            f"Run /{role} on to open the gate, or pass --force for a user-commanded dispatch."
+        )
+    return {"role": role, "gate_open": gate.exists(), "force": force}
+
+
 def current_state() -> dict:
-    """Active (tackling) + postponed problems with run summaries, plus queue counts."""
+    """Active (tackling) + postponed problems with run summaries, plus queue counts and gate state."""
     reg = load_registry()
     counts: dict[str, int] = {}
     active = []
@@ -473,7 +493,12 @@ def current_state() -> dict:
                 }
             )
     active.sort(key=lambda a: (a["status"] != "tackling", a["last_activity_utc"] or ""))
-    return {"counts": counts, "active": active}
+    gates = {
+        "STOP": (DATA_DIR / "STOP").exists(),
+        "SOLVER_ON": (DATA_DIR / "SOLVER_ON").exists(),
+        "HUNTER_ON": (DATA_DIR / "HUNTER_ON").exists(),
+    }
+    return {"counts": counts, "active": active, "gates": gates}
 
 
 def list_problems(status: str | None = None, field: str | None = None) -> list[dict]:
@@ -621,7 +646,10 @@ def main(argv: list[str] | None = None) -> int:
     p_set.add_argument("status")
     p_set.add_argument("--reason", help="transition note (stored on the entry, shown by /current)")
     p_set.add_argument("--verdict", choices=["true", "false"], help="mathematical outcome for solved entries")
-    p_set.add_argument("--force", action="store_true", help="bypass the chain gate (user-commanded dispatch)")
+    p_set.add_argument("--force", action="store_true", help="bypass the role gate (user-commanded dispatch)")
+    p_gate = sub.add_parser("gate-check", help="verify the role gate (solver|hunter) is open before dispatching")
+    p_gate.add_argument("role", choices=["solver", "hunter"])
+    p_gate.add_argument("--force", action="store_true", help="bypass the role gate (user-commanded dispatch)")
     p_mark = sub.add_parser("mark-hunted")
     p_mark.add_argument("field")
     args = ap.parse_args(argv)
@@ -640,6 +668,8 @@ def main(argv: list[str] | None = None) -> int:
             _print(current_state())
         elif args.cmd == "set-status":
             _print(set_status(args.problem_id, args.status, force=args.force, reason=args.reason, verdict=args.verdict))
+        elif args.cmd == "gate-check":
+            _print(gate_check(args.role, force=args.force))
         elif args.cmd == "mark-hunted":
             _print(mark_field_hunted(args.field))
         return 0

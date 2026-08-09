@@ -751,10 +751,38 @@ export default function mathxAutorun(pi: ExtensionApi) {
     return `${head}\n\n${verdictBlock}\n\n${proofBlock}`;
   }
 
+  /** OSC 52 terminal clipboard: ESC ] 52 ; c ; <base64> BEL. The USER's terminal
+   *  (iTerm2 / Windows Terminal / kitty / alacritty...) writes the payload to its
+   *  LOCAL clipboard — the only mechanism that crosses an SSH session. */
+  function writeOsc52(text: string): boolean {
+    try {
+      const b64 = Buffer.from(text, "utf-8").toString("base64");
+      process.stdout.write(`\x1b]52;c;${b64}\x07`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** macOS system clipboard via pbcopy (native UTF-8, stdin feed, no temp file). */
+  function pbcopySync(text: string): boolean {
+    try {
+      const r = spawnSync("pbcopy", [], { input: text, encoding: "utf-8" });
+      return r.status === 0;
+    } catch {
+      return false;
+    }
+  }
+
   /** Sync copy so one keypress completes and the footer updates on the same render. */
   function copyTextSync(text: string): boolean {
+    const inSSH = !!(process.env.SSH_CONNECTION || process.env.SSH_TTY);
+    if (inSSH && writeOsc52(text)) return true; // SSH: goes to the user's LOCAL clipboard
     if (nativesCopy) {
       try { nativesCopy(text); return true; } catch { /* fall through to shell */ }
+    }
+    if (process.platform === "darwin") {
+      return pbcopySync(text); // local Mac session
     }
     if (process.platform === "win32") {
       // clip.exe mangles non-ASCII (codepage); PowerShell Set-Clipboard + UTF-8 temp file is safe.

@@ -110,4 +110,36 @@ def test_clean_inbox_marked_ingested(ingest_env, monkeypatch):
     out = harvest.ingest()
     assert out["added"] == 1 and out["skipped_lines"] == 0
     reg = json.loads(harvest.REGISTRY_PATH.read_text(encoding="utf-8"))
-    assert "x_hunter.jsonl" in reg["ingested_inboxes"]
+    assert reg["ingested_inboxes"] == {"x_hunter.jsonl": 1}
+
+
+def test_lines_appended_after_ingest_are_processed(ingest_env, monkeypatch):
+    """Appending to an already-ingested inbox must not drop the new lines."""
+    inbox = ingest_env / "inbox" / "x_hunter.jsonl"
+    inbox.write_text(_line(title="First") + "\n", encoding="utf-8")
+    harvest.REGISTRY_PATH.write_text(json.dumps(_reg()), encoding="utf-8")
+    monkeypatch.setattr(harvest, "_dedup_judge", lambda c, m: False)
+
+    out1 = harvest.ingest()
+    assert out1["added"] == 1
+    # append a second line after the inbox was marked ingested
+    with inbox.open("a", encoding="utf-8") as fh:
+        fh.write(_line(title="Second") + "\n")
+    out2 = harvest.ingest()
+    assert out2["added"] == 1
+    assert out2["details"][0]["title"] == "Second"
+    reg = json.loads(harvest.REGISTRY_PATH.read_text(encoding="utf-8"))
+    assert reg["ingested_inboxes"] == {"x_hunter.jsonl": 2}
+
+
+def test_legacy_list_ingested_inboxes_migrates(ingest_env, monkeypatch):
+    """Legacy list-form ingested_inboxes is normalized to line counts."""
+    inbox = ingest_env / "inbox" / "x_hunter.jsonl"
+    inbox.write_text(_line(title="First") + "\n", encoding="utf-8")
+    harvest.REGISTRY_PATH.write_text(json.dumps(_reg(ingested=["x_hunter.jsonl"])), encoding="utf-8")
+    monkeypatch.setattr(harvest, "_dedup_judge", lambda c, m: False)
+    # legacy: file fully processed at its current line count → no new work
+    out = harvest.ingest()
+    assert out["added"] == 0
+    reg = json.loads(harvest.REGISTRY_PATH.read_text(encoding="utf-8"))
+    assert reg["ingested_inboxes"] == {"x_hunter.jsonl": 1}

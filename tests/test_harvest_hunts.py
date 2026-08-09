@@ -35,7 +35,8 @@ def test_begin_writes_lease(hunts_env):
     assert json.loads(path.read_text())["field"] == "number-theory"
 
 
-def test_concurrency_cap_rejects_second(hunts_env):
+def test_concurrency_cap_rejects_second(hunts_env, monkeypatch):
+    monkeypatch.setattr(harvest, "HUNTER_MAX_CONCURRENCY", 1)
     harvest.hunt_begin("number-theory", "hunter-a", "data/inbox/a.jsonl")
     with pytest.raises(ValueError, match="concurrency cap"):
         harvest.hunt_begin("algebra", "hunter-b", "data/inbox/b.jsonl")

@@ -388,6 +388,25 @@ def _ingest_one(reg: dict, cand: dict, fields: list[str]) -> dict:
     return {"action": "added", "id": pid, "title": title, "dedup_checked_against": len(matches), "note": note}
 
 
+def _inbox_progress(reg: dict) -> dict[str, int]:
+    """Normalize ingested_inboxes to {filename: processed_line_count}.
+
+    Legacy value was a list of filenames (all lines considered processed);
+    now a dict records how many lines were consumed so lines appended to an
+    already-ingested inbox still get ingested on the next run.
+    """
+    raw = reg.get("ingested_inboxes", [])
+    if isinstance(raw, dict):
+        return dict(raw)
+    progress: dict[str, int] = {}
+    for name in raw:
+        try:
+            progress[name] = len((INBOX_DIR / name).read_text(encoding="utf-8").splitlines())
+        except OSError:
+            progress[name] = 0
+    return progress
+
+
 def ingest() -> dict:
     reg = load_registry()
     fields = load_fields()
@@ -396,12 +415,18 @@ def ingest() -> dict:
     skipped_details: list[dict] = []
 
     INBOX_DIR.mkdir(parents=True, exist_ok=True)
+    progress = _inbox_progress(reg)
     for inbox in sorted(INBOX_DIR.glob("*.jsonl")):
-        if inbox.name in reg["ingested_inboxes"]:
+        processed = progress.get(inbox.name, 0)
+        lines = inbox.read_text(encoding="utf-8").splitlines()
+        if processed >= len(lines):
             continue
+        # Ingest only the lines appended since the last run. Lines already
+        # processed stay consumed; a bad line among the new ones leaves the
+        # file retryable (progress not advanced past it).
         fully_ingested = True
-        for lineno, line in enumerate(inbox.read_text(encoding="utf-8").splitlines(), 1):
-            line = line.strip()
+        for lineno in range(processed, len(lines)):
+            line = lines[lineno].strip()
             if not line:
                 continue
             try:
@@ -409,20 +434,20 @@ def ingest() -> dict:
             except json.JSONDecodeError as e:
                 fully_ingested = False
                 skipped += 1
-                skipped_details.append({"inbox": inbox.name, "line": lineno, "reason": f"bad JSON: {e}"})
+                skipped_details.append({"inbox": inbox.name, "line": lineno + 1, "reason": f"bad JSON: {e}"})
                 continue
             if not isinstance(obj, dict) or not str(obj.get("title", "")).strip() or not str(obj.get("statement", "")).strip():
                 fully_ingested = False
                 skipped += 1
-                skipped_details.append({"inbox": inbox.name, "line": lineno, "reason": "missing title/statement"})
+                skipped_details.append({"inbox": inbox.name, "line": lineno + 1, "reason": "missing title/statement"})
                 continue
             candidates.append(obj)
-        # Only mark the inbox ingested when every line parsed cleanly; a bad
-        # line leaves it retryable (fix the file, run ingest again). Good lines
-        # of a partially-bad inbox are re-judged as duplicates on retry — the
-        # dedup judge merges them harmlessly.
+        # Advance progress only when every new line parsed cleanly; a bad
+        # line leaves the tail retryable (fix the file, run ingest again).
+        # Good lines of a partially-bad tail are re-judged as duplicates on
+        # retry — the dedup judge merges them harmlessly.
         if fully_ingested:
-            reg["ingested_inboxes"].append(inbox.name)
+            progress[inbox.name] = len(lines)
 
     SEEDS_DIR.mkdir(parents=True, exist_ok=True)
     for seed in sorted(SEEDS_DIR.glob("*.md")):
@@ -441,6 +466,7 @@ def ingest() -> dict:
         else:
             merged += 1
 
+    reg["ingested_inboxes"] = progress
     save_registry(reg)
     return {
         "added": added,

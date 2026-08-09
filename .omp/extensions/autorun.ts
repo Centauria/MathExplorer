@@ -60,10 +60,24 @@ interface SessionEntry {
   data?: unknown;
 }
 
+interface ModelLike {
+  id: string;
+  provider?: string;
+  name?: string;
+  reasoning?: boolean;
+  contextWindow?: number;
+}
+
 interface ExtensionContext {
   cwd: string;
   hasUI: boolean;
   ui: UiContext;
+  models?: {
+    list(): ModelLike[];
+    current(): ModelLike | undefined;
+    resolve(spec: string): ModelLike | undefined;
+    family(m: ModelLike): string | undefined;
+  };
   isIdle(): boolean;
   getAsyncJobSnapshot(): unknown;
   setInterval(fn: () => void, ms: number): unknown;
@@ -182,6 +196,157 @@ function hasRunningJob(snapshot: unknown): boolean {
         : [];
   if (!Array.isArray(jobs)) return true; // unknown shape: assume busy, stay quiet
   return jobs.some(jobIsActive);
+}
+
+// ---- first-time setup wizard (worker model roles) ----
+
+const SETUP_ROLES: { role: string; label: string; hint: string }[] = [
+  { role: "mathx_solver", label: "mathx_solver — 求解主攻", hint: "证明攻关 worker" },
+  { role: "mathx_hunter", label: "mathx_hunter — 补货猎手", hint: "搜寻开放问题 worker" },
+  { role: "referee_1", label: "referee_1 — 裁判 1", hint: "交叉验证，建议与其它裁判不同模型" },
+  { role: "referee_2", label: "referee_2 — 裁判 2", hint: "交叉验证，建议与其它裁判不同模型" },
+  { role: "referee_3", label: "referee_3 — 裁判 3", hint: "交叉验证，建议与其它裁判不同模型" },
+];
+
+/** Replace or append a modelRoles block in .omp/config.yml (line-based, machine-managed). */
+function mergeModelRoles(text: string, roles: Record<string, string>): string {
+  const block = Object.entries(roles)
+    .map(([k, v]) => `  ${k}: "${v.replace(/"/g, '\\"')}"`)
+    .join("\n");
+  if (text.trim() === "") return `modelRoles:\n${block}\n`;
+  const lines = text.split(/\r?\n/);
+  const idx = lines.findIndex((l) => /^modelRoles:\s*$/.test(l));
+  if (idx === -1) {
+    return text.replace(/\s+$/, "") + `\n\nmodelRoles:\n${block}\n`;
+  }
+  let end = idx + 1;
+  while (end < lines.length && (lines[end].startsWith(" ") || lines[end].trim() === "")) end++;
+  const head = lines.slice(0, idx).join("\n").replace(/\s+$/, "");
+  const tail = lines.slice(end).join("\n").replace(/\s+$/, "");
+  return `${head}\nmodelRoles:\n${block}${tail ? `\n${tail}` : ""}\n`;
+}
+
+function needsSetup(): boolean {
+  // Setup is done iff the wizard's output exists: project .omp/config.yml with a
+  // modelRoles block. File-based (no ctx.models dependency), gitignored so a
+  // fresh clone always fires the wizard once.
+  try {
+    const text = readFileSync(join(process.cwd(), ".omp", "config.yml"), "utf-8");
+    return !/^modelRoles:/m.test(text);
+  } catch {
+    return true; // missing file → not set up yet
+  }
+}
+
+function modelSelector(m: ModelLike): string {
+  return m.provider ? `${m.provider}/${m.id}` : m.id;
+}
+
+function modelDescription(m: ModelLike): string {
+  const bits: string[] = [];
+  if (m.name && m.name !== m.id) bits.push(m.name);
+  if (m.reasoning) bits.push("推理");
+  if (m.contextWindow) bits.push(`${Math.round(m.contextWindow / 1000)}k ctx`);
+  return bits.join(" · ") || m.id;
+}
+
+/**
+ * Interactive first-time setup: pick a model per worker role via the searchable
+ * select dialog (same pattern as /show), then write .omp/config.yml modelRoles.
+ * Referee suggestions prefer models from families not yet chosen (cross-model
+ * verification). Headless/old builds fall back to a notify with instructions.
+ */
+async function runSetupWizard(ctx: ExtensionContext): Promise<void> {
+  if (typeof ctx.ui.select !== "function" || typeof ctx.ui.input !== "function" || !ctx.models?.list) {
+    ctx.ui.notify(
+      "当前环境不支持交互向导（headless/旧版 omp）：请手工编辑 .omp/config.yml 的 modelRoles，把 5 个角色指向可用模型。",
+      "warning",
+    );
+    return;
+  }
+  const models = ctx.models.list();
+  if (models.length === 0) {
+    ctx.ui.notify(
+      "未检测到任何可用模型：当前机器还没有可用的 LLM provider。\n" +
+      "请先完成 provider 配置，再重新运行 /mxsetup：\n" +
+      "  1) 编辑 ~/.omp/agent/models.yml 添加 provider，或用环境变量设置 API key；\n" +
+      "  2) 本项目常用 provider：kimi-code、SharedGLM、opencode-go、medeli、mathx（本地网关）；\n" +
+      "  3) 配置完成后重新运行 /mxsetup。",
+      "warning",
+    );
+    return;
+  }
+  const chosen: Record<string, string> = {};
+  const chosenFamilies: string[] = [];
+  for (const r of SETUP_ROLES) {
+    const items: { label: string; description?: string }[] = [
+      { label: "跟随 @default", description: "使用 default 角色的模型（推荐起步）" },
+      { label: "✎ 自定义输入…", description: "手动输入 provider/model，如 medeli/deepseek-v4-flash" },
+      ...models.map((m) => ({ label: modelSelector(m), description: modelDescription(m) })),
+    ];
+    // Referee: suggest a model whose family is not yet picked.
+    let suggested = models[0];
+    if (r.role.startsWith("referee_")) {
+      const alt = models.find((m) => {
+        const fam = ctx.models?.family?.(m);
+        return fam ? !chosenFamilies.includes(fam) : false;
+      });
+      if (alt) suggested = alt;
+    }
+    const initialIndex = 2 + models.indexOf(suggested);
+    const picked = await ctx.ui.select(
+      `选择 ${r.label} 的模型（${r.hint}）`,
+      items,
+      {
+        helpText: "↑↓ 导航 · 打字搜索(provider/模型) · Enter 选中 · Esc 跳过(用 @default)",
+        initialIndex: initialIndex >= 2 ? initialIndex : 2,
+      },
+    );
+    if (picked === undefined || picked === "跟随 @default") {
+      chosen[r.role] = "@default";
+      continue;
+    }
+    if (picked === "✎ 自定义输入…") {
+      const spec = await ctx.ui.input(`输入 ${r.role} 的模型（provider/model）`, "");
+      const s = (spec || "").trim();
+      if (!s) {
+        chosen[r.role] = "@default";
+        continue;
+      }
+      if (!ctx.models?.resolve?.(s)) {
+        ctx.ui.notify(`「${s}」无法解析，已回退 @default。可用模型可在 /model 中查看。`, "warning");
+        chosen[r.role] = "@default";
+        continue;
+      }
+      chosen[r.role] = s;
+      continue;
+    }
+    chosen[r.role] = picked;
+    const m = models.find((mm) => modelSelector(mm) === picked);
+    const fam = m ? ctx.models?.family?.(m) : undefined;
+    if (fam) chosenFamilies.push(fam);
+  }
+
+  const cfgPath = join(ctx.cwd, ".omp", "config.yml");
+  let text = "";
+  try {
+    text = readFileSync(cfgPath, "utf-8");
+  } catch { /* missing file: write fresh */ }
+  writeFileSync(cfgPath, mergeModelRoles(text, chosen), "utf-8");
+  ctx.ui.notify(
+    "已写入 .omp/config.yml（modelRoles）：\n" +
+      Object.entries(chosen).map(([k, v]) => `  ${k} = ${v}`).join("\n") +
+      "\n重启会话后生效。",
+    "info",
+  );
+  const usesGateway = Object.values(chosen).some((v) => v.startsWith("mathx/"));
+  if (usesGateway && !existsSync(join(ctx.cwd, "config.toml"))) {
+    ctx.ui.notify(
+      "你选择了 mathx/* 模型（经本地网关 127.0.0.1:8399 转发），但仓库根缺少 config.toml：\n" +
+      "请复制 config.example.toml 为 config.toml 并填入 [providers] 的 keys（或用 /config setup）。",
+      "warning",
+    );
+  }
 }
 
 export default function mathxAutorun(pi: ExtensionApi) {
@@ -351,6 +516,21 @@ export default function mathxAutorun(pi: ExtensionApi) {
         ctx.ui.notify("mathx gateway (:8399) 未运行，已在后台启动", "info");
       }
     } catch { /* gateway optional; worker spawns will fail visibly if it stays down */ }
+
+    // First-time setup: if worker roles don't resolve yet (fresh clone), offer the wizard.
+    try {
+      if (ctx.hasUI && needsSetup()) {
+        const go = await ctx.ui.confirm(
+          "MathExplorer 首次使用：需要配置 5 个 worker 模型角色（solver/hunter/referee×3）。现在设置？" +
+          "（稍后随时可用 /mxsetup 重新打开）",
+        );
+        if (go) {
+          // 不 await：extension handler 有 30s 超时，交互向导（5 次 select）必然超时被杀。
+          // fire-and-forget：dialog 由 UI 控制器驱动，handler 返回后仍可弹窗。
+          void runSetupWizard(ctx).catch((e) => ctx.ui.notify(`设置向导出错：${e}`, "error"));
+        }
+      }
+    } catch { /* setup wizard is best-effort */ }
 
     // Die-with-omp semantics: on session shutdown, kill the gateway we (or a
     // previous session) started — but only if it actually answers on :8399
@@ -814,6 +994,13 @@ export default function mathxAutorun(pi: ExtensionApi) {
     }
     return items.slice(0, 50);
   }
+
+  pi.registerCommand("mxsetup", {
+    description: "MathExplorer 首次配置：交互式选择 solver/hunter/referee 模型角色（写入 .omp/config.yml）",
+    handler: async (_args: string, ctx: ExtensionContext) => {
+      await runSetupWizard(ctx);
+    },
+  });
 
   pi.registerCommand("show", {
     description: "查看已记录问题：/show <id前缀> 直接看题；/show 交互菜单浏览过滤",

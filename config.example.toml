@@ -37,6 +37,16 @@ used_re = "(?m)^5h\\s+([0-9.]+)"
 threshold = 0.95
 
 # ------------------------------------------------------------
+# Optional hunter concurrency cap (mathx.harvest hunt-begin)
+# ------------------------------------------------------------
+# max_concurrency — how many hunter dispatches may hold a running lease at
+# once (data/hunts/*.json). Default 1. Raise to run parallel hunters; each
+# parallel hunter must hunt a DIFFERENT field (hunt-begin enforces the
+# same-field conflict), and cost scales linearly per hunter.
+[hunter]
+max_concurrency = 1
+
+# ------------------------------------------------------------
 # Provider pools. keys rotate round-robin (mathx.fleet: per-call forgiveness;
 # gateway: sticky dead on 401/402/403, failover before first byte).
 #

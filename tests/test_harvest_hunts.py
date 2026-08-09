@@ -78,3 +78,21 @@ def test_hunts_lists_active_and_stale(hunts_env):
     # age the lease past the (overridden) threshold → stale
     out2 = harvest.hunts(stale_hours=0)
     assert out2["active"][0]["stale"] is True
+
+
+def test_concurrency_reads_config_toml(tmp_path, monkeypatch):
+    monkeypatch.setattr(harvest, "REPO_ROOT", tmp_path)
+    # no config.toml → default 1
+    assert harvest._hunter_concurrency_from_config() == 1
+    # [hunter] max_concurrency honored
+    (tmp_path / "config.toml").write_text(
+        "active_provider = 'x'\n[hunter]\nmax_concurrency = 3\n", encoding="utf-8"
+    )
+    assert harvest._hunter_concurrency_from_config() == 3
+    # bad values degrade to 1
+    (tmp_path / "config.toml").write_text(
+        "[hunter]\nmax_concurrency = 'two'\n", encoding="utf-8"
+    )
+    assert harvest._hunter_concurrency_from_config() == 1
+    (tmp_path / "config.toml").write_text("not [ valid toml", encoding="utf-8")
+    assert harvest._hunter_concurrency_from_config() == 1

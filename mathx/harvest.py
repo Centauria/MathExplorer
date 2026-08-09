@@ -53,13 +53,34 @@ PROBLEMS_DIR = DATA_DIR / "problems"
 RESULTS_DIR = REPO_ROOT / "results"
 HUNTS_DIR = DATA_DIR / "hunts"
 
+
+def _hunter_concurrency_from_config() -> int:
+    """[hunter] max_concurrency from config.toml via stdlib tomllib, fallback 1.
+
+    harvest core stays config-optional (never imports mathx.config): a
+    missing/unreadable config.toml or a missing/bad key degrades to the
+    default instead of failing dispatch.
+    """
+    try:
+        import tomllib
+
+        data = tomllib.loads((REPO_ROOT / "config.toml").read_text(encoding="utf-8"))
+        v = (data.get("hunter") or {}).get("max_concurrency")
+        if isinstance(v, int) and not isinstance(v, bool) and v >= 1:
+            return v
+    except Exception:
+        pass
+    return 1
+
+
 # Hard capacity caps for hunter dispatch leases (data/hunts/*.json). A lease is
 # written BEFORE the task spawns, removed AFTER settlement — so the count of
 # running leases is the ground truth for "how many hunters are live", visible
-# across sessions (unlike in-process job lists). Raise deliberately to allow
-# parallel hunters; keep the field-conflict check in mind (two hunters on the
-# same field would hunt the same pool).
-HUNTER_MAX_CONCURRENCY = 1
+# across sessions (unlike in-process job lists). max_concurrency comes from
+# config.toml [hunter] (default 1); raise it deliberately to allow parallel
+# hunters, and keep the field-conflict rule in mind (two hunters on the same
+# field would hunt the same pool — hunt-begin rejects it).
+HUNTER_MAX_CONCURRENCY = _hunter_concurrency_from_config()
 HUNT_STALE_SECONDS = 2 * 3600
 
 DEFAULT_FIELDS = [

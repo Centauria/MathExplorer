@@ -61,7 +61,7 @@ def test_name_truncation_still_unique_per_suffix():
     nb = agent_name("solver", long_b)
     assert len(na) <= agents.MAX_NAME_LEN
     assert na != nb  # hash tail keeps distinct suffixes distinct
-    assert na.startswith("solver-k3-")
+    assert na.startswith(f"solver-{model_tag(resolve_model('solver'))}-")
 
 
 def test_name_keeps_suffix_when_tag_is_long():
@@ -84,8 +84,9 @@ def test_unknown_role_raises():
 def test_stamp_writes_agent_into_run_json(tmp_path):
     pid = "algebra/modrep"
     name = agent_name("solver", pid)
-    state = stamp(pid, name, resolve_model("solver"))
-    assert state["agent"] == {"name": name, "model": "kimi-code/k3"}
+    model = resolve_model("solver")
+    state = stamp(pid, name, model)
+    assert state["agent"] == {"name": name, "model": model}
 
     run_path = tmp_path / "results" / "algebra" / "modrep" / "run.json"
     assert run_path.exists()
@@ -94,6 +95,11 @@ def test_stamp_writes_agent_into_run_json(tmp_path):
     # stamping pre-inits the runstate so a later solver init stays a no-op
     assert on_disk["status"] == "running"
     assert on_disk["iteration"] == 0
+    # first stamp seeds one open history segment
+    hist = on_disk["agent_history"]
+    assert len(hist) == 1
+    assert hist[0]["name"] == name and hist[0]["model"] == model
+    assert hist[0]["from_utc"] and hist[0]["to_utc"] is None
 
 
 def test_stamp_is_idempotent_and_preserves_existing_state(tmp_path):
@@ -107,6 +113,7 @@ def test_stamp_is_idempotent_and_preserves_existing_state(tmp_path):
     assert state["max_iterations"] == 5
     assert state["iteration"] == 1
     assert state["agent"] == {"name": "solver-k3-x", "model": "kimi-code/k3"}
+    assert len(state["agent_history"]) == 1
 
 
 def test_stamp_rejects_empty_identity():
@@ -116,6 +123,51 @@ def test_stamp_rejects_empty_identity():
         stamp("algebra/modrep", "solver-k3-x", "")
 
 
+def test_stamp_same_identity_is_idempotent(tmp_path):
+    pid = "number-theory/abc"
+    stamp(pid, "solver-k3-x", "kimi-code/k3")
+    stamp(pid, "solver-k3-x", "kimi-code/k3")  # duplicate stamp (e.g. dispatcher retry)
+    state = json.loads((tmp_path / "results" / "number-theory" / "abc" / "run.json").read_text(encoding="utf-8"))
+    assert len(state["agent_history"]) == 1  # no noise entries
+
+
+def test_stamp_cross_model_appends_history_segments(tmp_path):
+    pid = "number-theory/abc"
+    first = stamp(pid, "solver-k3-x", "kimi-code/k3")
+    first_from = first["agent_history"][0]["from_utc"]
+    stamp(pid, "solver-glm52-x", "SharedGLM/glm-5.2")  # resumed across a model change
+
+    state = json.loads((tmp_path / "results" / "number-theory" / "abc" / "run.json").read_text(encoding="utf-8"))
+    hist = state["agent_history"]
+    assert len(hist) == 2
+    assert hist[0] == {"name": "solver-k3-x", "model": "kimi-code/k3", "from_utc": first_from, "to_utc": hist[1]["from_utc"]}
+    assert hist[1]["name"] == "solver-glm52-x" and hist[1]["model"] == "SharedGLM/glm-5.2"
+    assert hist[1]["to_utc"] is None  # active segment
+    assert state["agent"] == {"name": "solver-glm52-x", "model": "SharedGLM/glm-5.2"}  # latest
+
+
+def test_stamp_migrates_legacy_agent_field(tmp_path):
+    import mathx.runstate as rs
+
+    pid = "number-theory/abc"
+    rs.runstate_init(pid)
+    state = json.loads((tmp_path / "results" / "number-theory" / "abc" / "run.json").read_text(encoding="utf-8"))
+    state["agent"] = {"name": "solver-k3-legacy", "model": "kimi-code/k3"}  # pre-history file
+    rs._save(state)
+
+    stamp(pid, "solver-glm52-x", "SharedGLM/glm-5.2")
+    state = json.loads((tmp_path / "results" / "number-theory" / "abc" / "run.json").read_text(encoding="utf-8"))
+    hist = state["agent_history"]
+    assert len(hist) == 2
+    assert hist[0]["name"] == "solver-k3-legacy" and hist[0]["to_utc"] == hist[1]["from_utc"]
+    assert hist[1]["name"] == "solver-glm52-x" and hist[1]["to_utc"] is None
+
+    # re-stamping the legacy identity after migration does not duplicate it
+    stamp(pid, "solver-k3-legacy", "kimi-code/k3")
+    state = json.loads((tmp_path / "results" / "number-theory" / "abc" / "run.json").read_text(encoding="utf-8"))
+    assert len(state["agent_history"]) == 3  # legacy, glm52, back-to-k3
+
+
 # ---------------------------------------------------------------- CLI
 
 def test_cli_name_outputs_json(capsys):
@@ -123,9 +175,9 @@ def test_cli_name_outputs_json(capsys):
 
     assert main(["name", "solver", "algebra/modrep"]) == 0
     out = json.loads(capsys.readouterr().out)
-    assert out["name"].startswith("solver-k3-")
+    assert out["name"].startswith(f"solver-{model_tag(resolve_model('solver'))}-")
     assert out["role"] == "solver"
-    assert out["model"] == "kimi-code/k3"
+    assert out["model"] == resolve_model("solver")
 
 
 def test_cli_errors_on_bad_role(capsys):

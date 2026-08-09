@@ -3,7 +3,8 @@
 State file: results/<problem_id>/run.json
     {"problem_id", "status": "running|solved|unsolvable|postponed", "iteration": 0,
      "max_iterations": 3, "phase": "search",
-     "agent": {"name", "model"},   # stamped by the dispatcher (mathx.agents stamp)
+     "agent": {"name", "model"},        # latest stamp (mathx.agents stamp)
+     "agent_history": [{"name", "model", "from_utc", "to_utc"}],  # one entry per distinct identity; to_utc null = active segment
      "history": [{"iteration", "phase", "note", "utc"}]}
 
 Phase semantics (mirror run_example.sh's odd/even alternation; iteration 0 = search):
@@ -110,14 +111,34 @@ def runstate_stop(problem_id: str, outcome: str, verdict: str | None = None) -> 
 def set_agent(problem_id: str, agent_name: str, model: str) -> dict:
     """Stamp the worker identity (deterministic name embedding the model) into run.json.
 
-    Called by the dispatcher right after spawning + history verification, so the
-    archive records which model produced the result. Creates the runstate first if
-    the solver has not inited yet (runstate_init no-op semantics make this safe).
+    `agent` always holds the latest stamp; `agent_history` appends one entry per
+    distinct (name, model) dispatch with from_utc/to_utc intervals, so a problem
+    resumed across model changes stays fully traceable. Repeated stamps of the
+    same identity are idempotent (no duplicate history entries). Older run.json
+    files that only carry `agent` migrate their entry on first stamp.
     """
     if not agent_name or not model:
         raise ValueError("agent_name and model must be non-empty")
     state = runstate_init(problem_id)
-    state["agent"] = {"name": agent_name, "model": model}
+    now = _utc_now()
+    entry = {"name": agent_name, "model": model}
+
+    history = state.get("agent_history")
+    if not history:
+        # migrate a legacy single-stamp run.json (from_utc approximated as now)
+        old = state.get("agent")
+        history = [{"name": old["name"], "model": old["model"], "from_utc": now, "to_utc": None}] if old else []
+        state["agent_history"] = history
+
+    if history:
+        last = history[-1]
+        if last.get("to_utc") is None and (last["name"] != agent_name or last["model"] != model):
+            last["to_utc"] = now  # close the previous active segment
+    if not (history and history[-1].get("to_utc") is None
+            and history[-1]["name"] == agent_name and history[-1]["model"] == model):
+        history.append({"name": agent_name, "model": model, "from_utc": now, "to_utc": None})
+
+    state["agent"] = entry
     _save(state)
     return state
 

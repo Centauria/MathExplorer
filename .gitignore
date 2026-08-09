@@ -1,5 +1,6 @@
 config.toml
 .omp/config.yml
+.omp/config.yml.lock
 .env
 .venv/
 __pycache__/

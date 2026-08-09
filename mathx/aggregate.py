@@ -10,7 +10,9 @@ outcome — the rule lives in code, not in anyone's context:
                             AND has zero critical_errors AND zero gaps.
     An unparseable or missing report counts as "wrong".
 
-Outputs (upstream schema, unchanged from the retired mathx.verify pipeline):
+Outputs (upstream schema, unchanged from the retired mathx.verify pipeline,
+plus an additive top-level `referees` array carrying each referee's agent name
+and model, so the archive shows which model reviewed the proof):
   results/<problem_id>/verification.json — merged report + verdict + hints.
 
 CLI:
@@ -85,12 +87,17 @@ def _parse_verdict(content: str) -> dict | None:
     verdict = obj.get("verdict")
     if not isinstance(report, dict) or verdict not in ("correct", "wrong"):
         return None
+    referee = obj.get("referee")
+    meta = None
+    if isinstance(referee, dict) and (referee.get("name") or referee.get("model")):
+        meta = {"name": str(referee.get("name") or ""), "model": str(referee.get("model") or "")}
     return {
         "summary": str(report.get("summary", "")),
         "critical_errors": _norm_issues(report.get("critical_errors")),
         "gaps": _norm_issues(report.get("gaps")),
         "verdict": verdict,
         "repair_hints": str(obj.get("repair_hints", "")),
+        "referee": meta,
     }
 
 
@@ -101,6 +108,7 @@ def _unparseable_report(reason: str) -> dict:
         "gaps": [],
         "verdict": "wrong",
         "repair_hints": "Re-run this referee; it failed to produce a parseable report.",
+        "referee": None,
     }
 
 
@@ -145,6 +153,14 @@ def aggregate(problem_id: str, referees: int = 3) -> dict:
             if verdict == "correct"
             else "\n\n".join(f"[V{i}] {p['repair_hints']}" for i, p in enumerate(reports, 1) if p["repair_hints"])
         ),
+        "referees": [
+            {
+                "index": i,
+                "name": (p["referee"] or {}).get("name", ""),
+                "model": (p["referee"] or {}).get("model", ""),
+            }
+            for i, p in enumerate(reports, 1)
+        ],
     }
 
     out_path = REPO_ROOT / "results" / rel / "verification.json"

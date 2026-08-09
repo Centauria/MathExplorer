@@ -3,6 +3,7 @@
 State file: results/<problem_id>/run.json
     {"problem_id", "status": "running|solved|unsolvable|postponed", "iteration": 0,
      "max_iterations": 3, "phase": "search",
+     "agent": {"name", "model"},   # stamped by the dispatcher (mathx.agents stamp)
      "history": [{"iteration", "phase", "note", "utc"}]}
 
 Phase semantics (mirror run_example.sh's odd/even alternation; iteration 0 = search):
@@ -102,6 +103,21 @@ def runstate_stop(problem_id: str, outcome: str, verdict: str | None = None) -> 
     state["history"].append(
         {"iteration": state["iteration"], "phase": state["phase"], "note": f"stopped: {outcome}", "utc": _utc_now()}
     )
+    _save(state)
+    return state
+
+
+def set_agent(problem_id: str, agent_name: str, model: str) -> dict:
+    """Stamp the worker identity (deterministic name embedding the model) into run.json.
+
+    Called by the dispatcher right after spawning + history verification, so the
+    archive records which model produced the result. Creates the runstate first if
+    the solver has not inited yet (runstate_init no-op semantics make this safe).
+    """
+    if not agent_name or not model:
+        raise ValueError("agent_name and model must be non-empty")
+    state = runstate_init(problem_id)
+    state["agent"] = {"name": agent_name, "model": model}
     _save(state)
     return state
 

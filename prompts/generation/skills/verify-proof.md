@@ -21,12 +21,12 @@ Read:
 1. Read the current `results/{problem_id}/blueprint.md` draft as pure text.
 2. First check that `blueprint.md` contains a full proof draft of the entire target theorem rather than a partial proof, fragment, or exploratory notes. If it does not, do not call the referees yet.
 3. Demand-coverage gate: read the problem's Statement and check that the main theorem's conclusion actually settles what the Statement demands (exactly what VERIFIER.md Phase 2.5 will check). In particular, if the conclusion merely restates the problem as open/unknown (e.g. "the exact value remains an open problem" when the Statement asks for the exact value), or establishes only bounds/numerics/partial cases without the demanded claim, do NOT spawn the referees — the panel would be guaranteed to fail and is wasted. Instead return to the proving loop and keep working toward the demand, or preserve progress and stall at the iteration cap.
-3. Spawn the three referees in ONE parallel `tasks[]` batch (each item carries its own `agent` field; task text is only the problem_id):
+3. Spawn the three referees in ONE parallel `tasks[]` batch (each item carries its own `agent` field plus a model-bearing `name` — generate with `uv run python -m mathx.agents name referee-N <problem_id>`, N = 1|2|3 — and pass `agent_name`/`model` in the task text):
    ```
    tasks: [
-     {"agent": "referee-1", "task": "problem_id = <problem_id>"},
-     {"agent": "referee-2", "task": "problem_id = <problem_id>"},
-     {"agent": "referee-3", "task": "problem_id = <problem_id>"}
+     {"agent": "referee-1", "name": "<referee1-name>", "task": "problem_id = <problem_id>. agent_name = <referee1-name>, model = <referee1-model>"},
+     {"agent": "referee-2", "name": "<referee2-name>", "task": "problem_id = <problem_id>. agent_name = <referee2-name>, model = <referee2-model>"},
+     {"agent": "referee-3", "name": "<referee3-name>", "task": "problem_id = <problem_id>. agent_name = <referee3-name>, model = <referee3-model>"}
    ]
    ```
    Each referee independently reads `prompts/verification/VERIFIER.md`, the statement, and the blueprint; checks external citations live (web_search + `mathx.leansearch` via bash); and writes `results/{problem_id}/referee/v{1,2,3}.json`. This may take several minutes; that is normal.
@@ -44,7 +44,7 @@ Read:
 
 ## Output Contract
 
-Append to `verification_reports`:
+Append to `verification_reports` — exactly what the aggregator returns, including its additive top-level `referees` array (each entry carries the reviewing referee's `name` + `model`):
 
 ```json
 {
@@ -58,7 +58,10 @@ Append to `verification_reports`:
     ]
   },
   "verdict": "string",
-  "repair_hints": "string"
+  "repair_hints": "string",
+  "referees": [
+    {"index": 1, "name": "referee1-deepseekV4Flash-...", "model": "medeli/deepseek-v4-flash:xhigh"}
+  ]
 }
 ```
 

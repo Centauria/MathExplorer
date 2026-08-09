@@ -1207,8 +1207,8 @@ export default function mathxAutorun(pi: ExtensionApi) {
           `用户通过 /solve 请求开始攻关：${e.id}（前缀=${prefix}，当前状态=${e.status}${resume ? "，恢复续攻" : ""}）。` +
           `按项目派发纪律执行：` +
           `1) 先 \`uv run python -m mathx.harvest set-status ${e.id} tackling\`；若报 "chain gate closed"（data/CHAIN_ON 不存在）且这是用户命令，用 --force 绕过。` +
-          `2) 用 task 工具后台派出 solver，调用必须含 "agent": "solver" 字段：{"agent": "solver", "task": "problem_id = ${e.id}. Read prompts/generation/AGENTS.md and follow it exactly (memory policy, iteration protocol, stdin=DEVNULL discipline, _tmp_*.json cleanup). Resume from results/${e.id}/run.json if it exists, else runstate init + memory init."}` +
-          `3) 派出后立即读 history://<spawned-id> 头部验证：agent 类型为 solver、model 符合 mathx_solver 角色；不对就 cancel 重派。` +
+          `2) 用 \`uv run python -m mathx.agents name solver ${e.id}\` 生成 name（含所用模型，如 solver-k3-...），用 task 工具后台派出 solver，调用必须含 "agent": "solver" 字段与模型化的 "name"：{"agent": "solver", "name": "<name>", "task": "problem_id = ${e.id}. agent_name = <name>, model = <model>. Read prompts/generation/AGENTS.md and follow it exactly (memory policy, iteration protocol, stdin=DEVNULL discipline, _tmp_*.json cleanup). Resume from results/${e.id}/run.json if it exists, else runstate init + memory init."}` +
+          `3) 派出后立即读 history://<spawned-id> 头部验证：agent 类型为 solver、model 符合 mathx_solver 角色；不对就 cancel 重派。验证通过后 \`uv run python -m mathx.agents stamp ${e.id} <name> <model>\` 把身份写入 run.json 的 agent 字段（归档可查模型）。` +
           (resume ? `该题处于 postponed，solver 需读 results/${e.id}/run.json 从上次迭代续攻（revival 语义）。` : ""),
         );
       } catch { /* best-effort */ }
@@ -1269,7 +1269,7 @@ export default function mathxAutorun(pi: ExtensionApi) {
         const run = a.run ?? {};
         lines.push(`▶ ${a.id} — ${a.title}`);
         lines.push(`  attempts=${a.attempts ?? 0} · 最后活动 ${(a.last_activity_utc ?? "").slice(0, 19).replace("T", " ")}`);
-        lines.push(`  进度: iteration ${run.iteration ?? "?"}/${run.max_iterations ?? "?"} · phase=${run.phase ?? "?"} · run=${run.status ?? "?"}`);
+        lines.push(`  进度: iteration ${run.iteration ?? "?"}/${run.max_iterations ?? "?"} · phase=${run.phase ?? "?"} · run=${run.status ?? "?"}${run.agent?.model ? ` · 模型=${run.agent.model}` : ""}`);
         lines.push("");
       }
       if (postponed.length > 0) {

@@ -76,12 +76,12 @@ No-provider fallback (`mathx.fleet` exit code 3 means config.toml missing, quota
 
 When — and only when — a full proof of the whole problem has been assembled in `results/<problem_id>/blueprint.md` (never on partial proofs, incomplete branches, isolated lemmas, or drafts with no real progress on the full theorem), AND that proof actually settles the problem's demanded claim (see Hard Invariant 16):
 
-1. Spawn the three referees in ONE parallel `tasks[]` batch. Each task item MUST carry its own `agent` field; the task text is just the problem_id (the agent definition contains the full instructions). Skeleton:
+1. Spawn the three referees in ONE parallel `tasks[]` batch. Each task item MUST carry its own `agent` field and a model-bearing `name` — generate the three names with `uv run python -m mathx.agents name referee-N <problem_id>` (N = 1|2|3) and pass `agent_name`/`model` in each task text so the referee records them in its vN.json `referee` key. Skeleton:
    ```
    tasks: [
-     {"agent": "referee-1", "task": "problem_id = <problem_id>"},
-     {"agent": "referee-2", "task": "problem_id = <problem_id>"},
-     {"agent": "referee-3", "task": "problem_id = <problem_id>"}
+     {"agent": "referee-1", "name": "<referee1-name>", "task": "problem_id = <problem_id>. agent_name = <referee1-name>, model = <referee1-model>"},
+     {"agent": "referee-2", "name": "<referee2-name>", "task": "problem_id = <problem_id>. agent_name = <referee2-name>, model = <referee2-model>"},
+     {"agent": "referee-3", "name": "<referee3-name>", "task": "problem_id = <problem_id>. agent_name = <referee3-name>, model = <referee3-model>"}
    ]
    ```
    Each referee reads `prompts/verification/VERIFIER.md`, the statement, and the blueprint; checks external citations live (web_search + leansearch); and writes `results/<problem_id>/referee/v{1,2,3}.json`.

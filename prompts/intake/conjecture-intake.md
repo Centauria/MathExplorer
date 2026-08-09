@@ -21,7 +21,7 @@ When the statement is checkable for small cases (number theory, combinatorics, f
 ## Step 4 — File and route
 1. Write `data/seeds/<slug>.md` with YAML frontmatter (`title`, `field` (the closest matching line of `data/fields.txt`), `origin: user`, `tractability` 1–5 honest estimate) and body sections `## Statement` (the precise restatement) and `## Triage` (findings and evidence from Steps 2–3).
 2. Run `uv run python -m mathx.harvest ingest` (uniform registration + dedup). Report the assigned problem id.
-3. Tell the user the triage outcome in 2–3 sentences. Unless the user asked only for an assessment, dispatch: spawn agent="solver" in the background with the new problem id, per the dispatcher discipline in the root AGENTS.md.
+3. Tell the user the triage outcome in 2–3 sentences. Unless the user asked only for an assessment, dispatch: spawn agent="solver" in the background with the new problem id, per the dispatcher discipline in the root AGENTS.md. The dispatch `name` MUST embed the model: `uv run python -m mathx.agents name solver <problem_id>` → use its `name` field and put `agent_name` + `model` into the task text; after spawning and verifying `history://<id>`, run `uv run python -m mathx.agents stamp <problem_id> <name> <model>` so run.json records which model produced the result.
 
 ## Hard rules
 - Never dispatch the solver on a statement you have not restated precisely.

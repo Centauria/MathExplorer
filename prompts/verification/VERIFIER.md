@@ -76,10 +76,14 @@ If verdict is `"correct"`, set `"repair_hints"` to `""`. If verdict is `"wrong"`
 
 ## Output contract
 
-Respond with ONLY one JSON object — no markdown fences, no commentary, no preamble:
+Respond with ONLY one JSON object — no markdown fences, no commentary, no preamble. The dispatch task text passes your `agent_name` and `model`; include them verbatim as the FIRST key (`referee`) so the archive records which model reviewed this proof. If the dispatch did not provide them, omit the key:
 
 ```json
 {
+  "referee": {
+    "name": "<agent_name from dispatch>",
+    "model": "<model from dispatch>"
+  },
   "verification_report": {
     "summary": "string",
     "critical_errors": [

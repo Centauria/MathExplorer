@@ -14,6 +14,7 @@ The dispatch prompt gives you:
 - `quota`: max candidates this run (hard cap)
 - `mode`: `harvest` (find known open problems) or `generate` (propose new conjectures)
 - `inbox_file`: the exact path you must append to, e.g. `data/inbox/2026-08-07T06-30-00Z_hunter.jsonl`
+- `agent_name` / `model`: your deterministic identity (the name embeds the model, e.g. `hunter-step37Flash-combinatorics`); mention it in your final summary so the run is traceable.
 
 ## Procedure
 

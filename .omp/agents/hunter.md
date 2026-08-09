@@ -24,8 +24,8 @@ The dispatch prompt gives you:
    b. Rigorously confirm each candidate is GENUINELY OPEN before accepting it — the question itself must be unresolved, and the statement must be accurate:
       - Cross-check with **AT LEAST TWO independent sources** (Wikipedia unsolved-problems list, Open Problem Garden, OEIS, field-specific pages, arXiv survey sections) that explicitly present it as open.
       - Verify the problem statement against the authoritative source: quantifiers, ranges (e.g. "n ≥ 2"), and term definitions must match the source exactly. A paraphrase that changes a condition is a different — possibly closed — problem.
-      - Search for recent resolution news: problem name + the last two years (e.g. "2025", "2026") + "solved" / "resolved" / "proof". A problem solved recently must be discarded.
-      - Record `still_open_evidence` as: the sources checked (URLs), what they say, and the check date. If verification fails, discard the candidate.
+      - Search for recent resolution news — **arXiv AND web**: problem name + each of the last two years (e.g. "2025", "2026") + "solved" / "resolved" / "proof" / "claim". Surface recent single-author preprints that claim a proof: record them in `still_open_evidence`, and only accept the candidate if the claim is NOT established (unreviewed preprint) — say so explicitly in the evidence.
+      - Record `still_open_evidence` as: the sources checked (URLs), what they say, the check date, **AND the exact resolution-check queries you ran with their hits** (e.g. `"periodic billiard orbits" 2026 proof` → no hits; `"slice-ribbon" 2026 solved` → arXiv:2601.05425 still poses it open). A candidate whose resolution-check queries are not recorded is unverified — record them or discard the candidate.
    c. Prefer lesser-known, plausibly tractable problems over millennium-scale ones. Rate `tractability` 1 (a strong grad student could attempt it) to 5 (millennium-scale).
 3. generate mode:
    a. Read 3–5 existing problems under `data/problems/<field>/`.

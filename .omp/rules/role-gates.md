@@ -7,7 +7,7 @@ scope: ["tool:task"]
 A `tasks[]` item with `"agent": "solver"|"hunter"|"referee-N"` is a MathExplorer dispatch. Dispatches are gated per role (white-list gates, files under `data/`):
 
 - **solver / referee-N dispatches**: the mandatory pre-dispatch step `set-status <pid> tackling` raises "solver gate closed" unless `data/SOLVER_ON` exists. Referees are sub-agents of the solver and inherit the solver gate — no separate referee gate.
-- **hunter dispatches**: `uv run python -m mathx.harvest gate-check hunter` MUST be run immediately before the dispatch; it raises "hunter gate closed" unless `data/HUNTER_ON` exists.
+- **hunter dispatches**: `uv run python -m mathx.harvest gate-check hunter` MUST be run immediately before the dispatch; it raises "hunter gate closed" unless `data/HUNTER_ON` exists. Then `hunt-begin <field> --agent <name> --inbox <file>` MUST succeed (writes the dispatch lease `data/hunts/<name>.json`; enforces the concurrency cap and same-field conflict) before the task spawns. After settlement (`ingest` + `mark-hunted`) the lease MUST be removed with `hunt-end <name>`.
 
 **If you are about to dispatch (this call has not executed yet):**
 - solver/referee: first confirm `data/SOLVER_ON` exists (glob it). If it does NOT:
@@ -16,5 +16,6 @@ A `tasks[]` item with `"agent": "solver"|"hunter"|"referee-N"` is a MathExplorer
 - hunter: run `gate-check hunter` first. If it fails:
   - Automatic refill → DO NOT dispatch. Stop, report, wait (`/hunter on` or an explicit user command).
   - User-commanded dispatch → re-run with `--force`.
+  On success, `hunt-begin` must also succeed (lease written) before spawning; `hunt-end` after settlement.
 
 The role gates exist because the dispatcher's own judgment failed once (settled a solve, then advanced without checking the gate). They are enforced in code at `set-status tackling` (solver) and `gate-check` (hunter); this rule is the second layer, catching the task-tool call itself.

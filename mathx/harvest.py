@@ -21,6 +21,10 @@ CLI:
     uv run python -m mathx.harvest solution [problem_id]
     uv run python -m mathx.harvest current
     uv run python -m mathx.harvest set-status <problem_id> <status> [--reason ...] [--verdict true|false] [--force]
+    uv run python -m mathx.harvest gate-check <solver|hunter> [--force]
+    uv run python -m mathx.harvest hunt-begin <field> --agent <name> --inbox <file> [--model m] [--quota n] [--force]
+    uv run python -m mathx.harvest hunt-end <agent_name>
+    uv run python -m mathx.harvest hunts [--stale-hours h]
     uv run python -m mathx.harvest mark-hunted <field>
 """
 
@@ -47,6 +51,16 @@ INBOX_DIR = DATA_DIR / "inbox"
 SEEDS_DIR = DATA_DIR / "seeds"
 PROBLEMS_DIR = DATA_DIR / "problems"
 RESULTS_DIR = REPO_ROOT / "results"
+HUNTS_DIR = DATA_DIR / "hunts"
+
+# Hard capacity caps for hunter dispatch leases (data/hunts/*.json). A lease is
+# written BEFORE the task spawns, removed AFTER settlement — so the count of
+# running leases is the ground truth for "how many hunters are live", visible
+# across sessions (unlike in-process job lists). Raise deliberately to allow
+# parallel hunters; keep the field-conflict check in mind (two hunters on the
+# same field would hunt the same pool).
+HUNTER_MAX_CONCURRENCY = 1
+HUNT_STALE_SECONDS = 2 * 3600
 
 DEFAULT_FIELDS = [
     "number-theory",
@@ -471,6 +485,102 @@ def gate_check(role: str, force: bool = False) -> dict:
     return {"role": role, "gate_open": gate.exists(), "force": force}
 
 
+def _hunt_lease_path(agent_name: str) -> Path:
+    return HUNTS_DIR / f"{agent_name}.json"
+
+
+def _load_hunts() -> list[dict]:
+    """All lease files (any status), oldest dispatch first. Missing dir → []."""
+    if not HUNTS_DIR.exists():
+        return []
+    leases = []
+    for p in sorted(HUNTS_DIR.glob("*.json")):
+        lease = _read_json(p)
+        if lease is not None:
+            leases.append(lease)
+    return leases
+
+
+def _active_hunts() -> list[dict]:
+    return [h for h in _load_hunts() if h.get("status") == "running"]
+
+
+def hunt_begin(
+    field: str,
+    agent_name: str,
+    inbox_file: str,
+    model: str | None = None,
+    quota: int | None = None,
+    force: bool = False,
+) -> dict:
+    """Register a hunter dispatch lease BEFORE spawning the task.
+
+    Two hard invariants (not gates — they are capacity/rotation rules):
+    - concurrency cap: at most HUNTER_MAX_CONCURRENCY running hunters;
+    - field conflict: no second hunter on the same field at once.
+    ``force`` bypasses both (explicit user command, e.g. a deliberate parallel
+    hunt); it does NOT bypass the role gate, which `gate-check hunter` owns.
+    """
+    HUNTS_DIR.mkdir(parents=True, exist_ok=True)
+    active = _active_hunts()
+    if not force and len(active) >= HUNTER_MAX_CONCURRENCY:
+        raise ValueError(
+            f"hunter concurrency cap reached: {len(active)} active (max {HUNTER_MAX_CONCURRENCY}). "
+            "Wait for a lease to settle, or raise HUNTER_MAX_CONCURRENCY."
+        )
+    if not force and any(h.get("field") == field for h in active):
+        raise ValueError(
+            f"field conflict: another hunter is already hunting {field!r}. "
+            "Pick a different field or wait for it to settle."
+        )
+    lease = {
+        "agent_name": agent_name,
+        "field": field,
+        "inbox_file": inbox_file,
+        "model": model,
+        "quota": quota,
+        "dispatched_at_utc": _utc_now(),
+        "status": "running",
+    }
+    path = _hunt_lease_path(agent_name)
+    path.write_text(json.dumps(lease, ensure_ascii=False, indent=2), encoding="utf-8")
+    return lease
+
+
+def hunt_end(agent_name: str) -> dict:
+    """Remove a hunter lease after settlement (ingest + mark-hunted done)."""
+    path = _hunt_lease_path(agent_name)
+    if not path.exists():
+        raise KeyError(f"no hunter lease for {agent_name!r}")
+    lease = _read_json(path) or {}
+    path.unlink()
+    return lease
+
+
+def hunts(stale_hours: float | None = None) -> dict:
+    """List hunter leases; running leases older than the stale threshold are flagged.
+
+    A running lease past the threshold is a dispatch whose process died — the
+    orchestrator should settle any leftover inbox and remove the lease
+    (``hunt-end``), or re-dispatch.
+    """
+    now = _utc_now()
+    threshold = (stale_hours * 3600) if stale_hours is not None else HUNT_STALE_SECONDS
+    out = []
+    for lease in _load_hunts():
+        entry = dict(lease)
+        if entry.get("status") == "running":
+            dispatched = entry.get("dispatched_at_utc", "")
+            try:
+                age = (datetime.fromisoformat(now) - datetime.fromisoformat(dispatched)).total_seconds()
+            except (ValueError, TypeError):
+                age = None
+            entry["stale"] = age is not None and age > threshold
+            entry["age_seconds"] = round(age) if age is not None else None
+        out.append(entry)
+    return {"active": [h for h in out if h.get("status") == "running"], "all": out}
+
+
 def current_state() -> dict:
     """Active (tackling) + postponed problems with run summaries, plus queue counts and gate state."""
     reg = load_registry()
@@ -650,6 +760,17 @@ def main(argv: list[str] | None = None) -> int:
     p_gate = sub.add_parser("gate-check", help="verify the role gate (solver|hunter) is open before dispatching")
     p_gate.add_argument("role", choices=["solver", "hunter"])
     p_gate.add_argument("--force", action="store_true", help="bypass the role gate (user-commanded dispatch)")
+    p_hb = sub.add_parser("hunt-begin", help="register a hunter dispatch lease BEFORE spawning (concurrency + field-conflict check)")
+    p_hb.add_argument("field")
+    p_hb.add_argument("--agent", required=True)
+    p_hb.add_argument("--inbox", required=True)
+    p_hb.add_argument("--model")
+    p_hb.add_argument("--quota", type=int)
+    p_hb.add_argument("--force", action="store_true", help="bypass concurrency/field-conflict checks (user-commanded dispatch)")
+    p_he = sub.add_parser("hunt-end", help="remove a hunter lease after settlement")
+    p_he.add_argument("agent_name")
+    p_h = sub.add_parser("hunts", help="list hunter leases (active + all, stale-marked)")
+    p_h.add_argument("--stale-hours", type=float, help="override the stale threshold (default 2h)")
     p_mark = sub.add_parser("mark-hunted")
     p_mark.add_argument("field")
     args = ap.parse_args(argv)
@@ -670,6 +791,12 @@ def main(argv: list[str] | None = None) -> int:
             _print(set_status(args.problem_id, args.status, force=args.force, reason=args.reason, verdict=args.verdict))
         elif args.cmd == "gate-check":
             _print(gate_check(args.role, force=args.force))
+        elif args.cmd == "hunt-begin":
+            _print(hunt_begin(args.field, args.agent, args.inbox, model=args.model, quota=args.quota, force=args.force))
+        elif args.cmd == "hunt-end":
+            _print(hunt_end(args.agent_name))
+        elif args.cmd == "hunts":
+            _print(hunts(stale_hours=getattr(args, "stale_hours", None)))
         elif args.cmd == "mark-hunted":
             _print(mark_field_hunted(args.field))
         return 0

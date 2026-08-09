@@ -5,6 +5,7 @@ description: 派 hunter 补货 open problems（/hunt [field] [quota]）
 - field 为空：先运行 `uv run python -m mathx.harvest next-field` 取轮转领域。
 - quota 为空：默认 1（一次一题，把每题 open 验证做透；自动续派补足轮次）。
 - **hunter 闸检查**：派 hunter 前必须先跑 `uv run python -m mathx.harvest gate-check hunter`——hunter 闸是白名单（`data/HUNTER_ON` 存在才允许自动补货），闸关时该命令报错并拒绝；停手只汇报（用户明确指令时用 `--force`）。
+- **派发登记**：闸开后再跑 `uv run python -m mathx.harvest hunt-begin <field> --agent <name> --inbox <inbox_file> --model <model> --quota <quota>`——写 `data/hunts/<name>.json` lease（并发上限 + 同 field 冲突在此被代码拒绝；用户明确并行指令时加 `--force`）。**结算（ingest + mark-hunted）后 `uv run python -m mathx.harvest hunt-end <name>` 删除 lease**。`hunts` 列出活跃 hunter 与 stale（>2h 未结算的 running lease = 进程已死，需清理/重派）。
 用 task 工具派出 agent=hunter：mode=harvest，inbox_file=data/inbox/<当前UTC>_hunter.jsonl。**task 调用必须包含 `"agent": "hunter"` 字段**——照此骨架构造，不得省略 agent；`name` 用 `uv run python -m mathx.agents name hunter <field>` 生成（含模型，如 `hunter-step37Flash-combinatorics`）：
 
 ```

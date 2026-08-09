@@ -17,6 +17,7 @@ data/STOP
 data/CHAIN_ON
 data/SOLVER_ON
 data/HUNTER_ON
+data/hunts/*
 data/inbox/*
 !data/inbox/.gitkeep
 data/seeds/*

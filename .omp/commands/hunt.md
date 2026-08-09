@@ -16,3 +16,12 @@ tasks: [{
 ```
 
 派出后立即读 `history://<spawned-id>` 头部验证 agent 类型与模型；不对就 cancel 重派。hunter 返回后运行 `uv run python -m mathx.harvest ingest` 和 `uv run python -m mathx.harvest mark-hunted <field>`，并汇报本轮新增/合并数量。
+
+## 连续补货（低水位自动续派）
+
+hunter 不常驻——每轮跑完 quota 就 yield，由调度员结算后决定续派：
+
+1. 触发：队列 `queued < 5` 且 `data/CHAIN_ON` 存在且无 hunter 在跑（无论 solver 是否在跑，两者角色独立）。
+2. 续派：本轮 ingest + mark-hunted 后，若 `queued` 仍 < 5 且闸开 → 立即按本文件流程派下一轮 hunter（field 用 `mathx.harvest next-field` 轮转）。
+3. 停止：`queued ≥ 5` / `data/STOP` 存在 / 链闸关闭 / quota gate 触发（`[quota] threshold`）→ 停手只汇报。
+4. 每轮 quota 默认 5；水位与 quota 可在命令参数里临时调整。
